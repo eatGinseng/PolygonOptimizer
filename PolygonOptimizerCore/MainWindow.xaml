@@ -67,8 +67,10 @@
             <hx:EnvironmentMap3D IsRendering="{Binding RenderEnvironmentMap}"
                                  Texture="{Binding EnvironmentMap}" />
             <hx:Element3DPresenter Content="{Binding GroupModel}" />
-            <hx:MeshGeometryModel3D Geometry="{Binding SelectionMesh}" Material="{Binding SelectionMaterial}" />
-            <hx:PostEffectMeshBorderHighlight EffectName="highlight" />
+            <hx:MeshGeometryModel3D Geometry="{Binding SelectionMesh}" Material="{Binding SelectionMaterial}" IsHitTestVisible="False" />
+            <hx:LineGeometryModel3D Geometry="{Binding OctahedronLines}"
+                                    Color="Cyan"
+                                    IsRendering="{Binding ShowOctahedron}" />
         </hx:Viewport3DX>
         <Grid Grid.Row="1"
               Background="#7B363636"
@@ -127,10 +129,36 @@
                 <ComboBox Margin="4"
                           SelectedItem="{Binding SelectionMode}"
                           ItemsSource="{Binding Source={StaticResource SelectionModeValues}}" />
+                <StackPanel Margin="4" Orientation="Horizontal"
+                            Visibility="{Binding IsViewSelectionMode, Converter={StaticResource boolToVisibilityConverter}}">
+                    <TextBlock VerticalAlignment="Center">Threshold (%):</TextBlock>
+                    <TextBox Width="50" Margin="4,0" Text="{Binding OcclusionThreshold, UpdateSourceTrigger=PropertyChanged}" />
+                </StackPanel>
                 <Button Margin="4"
                         Command="{Binding SelectCurrentViewCommand}"
                         Visibility="{Binding IsViewSelectionMode, Converter={StaticResource boolToVisibilityConverter}}">
                     Select Current View
+                </Button>
+                <Button Margin="4"
+                        Command="{Binding InvertVisibleSelectionCommand}">
+                    Invert
+                </Button>
+                <Button Margin="4"
+                        Command="{Binding ClearVisibleSelectionCommand}">
+                    Clear
+                </Button>
+                <Separator />
+                <TextBlock>Iterate Properties</TextBlock>
+                <CheckBox Margin="4"
+                          IsChecked="{Binding ShowOctahedron}">Show Octahedron</CheckBox>
+                <StackPanel Margin="4" Orientation="Horizontal">
+                    <TextBlock VerticalAlignment="Center">Resolution:</TextBlock>
+                    <TextBox Width="40" Margin="4,0"
+                             Text="{Binding OctahedronResolution, UpdateSourceTrigger=PropertyChanged}" />
+                </StackPanel>
+                <Button Margin="4"
+                        Command="{Binding IterateViewsCommand}">
+                    Iterate Views
                 </Button>
                 <Separator />
                 <TextBlock>Animations</TextBlock>

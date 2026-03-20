@@ -39,7 +39,10 @@ public partial class MainWindow : Window
                     vm.Selected = !vm.Selected;
 
                 if (DataContext is MainViewModel mainVm)
-                    mainVm.HandleTriangleSelection(arg.HitTestResult);
+                {
+                    bool shiftDown = (Keyboard.Modifiers & ModifierKeys.Shift) != 0;
+                    mainVm.HandleTriangleSelection(arg.HitTestResult, shiftDown);
+                }
             }
         }));
 

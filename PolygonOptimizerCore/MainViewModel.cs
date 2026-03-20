@@ -25,12 +25,15 @@ namespace FileLoadDemo;
 
 public enum SelectionMode
 {
+    Navigate,
     Single,
     View
 }
 
 public partial class MainViewModel : DemoCore.BaseViewModel
 {
+    private const int RenderWaitMs = 25;
+
     private readonly string OpenFileFilter = $"{HelixToolkit.SharpDX.Assimp.Importer.SupportedFormatsString}";
     private readonly string ExportFileFilter = $"{HelixToolkit.SharpDX.Assimp.Exporter.SupportedFormatsString}";
 
@@ -49,6 +52,26 @@ public partial class MainViewModel : DemoCore.BaseViewModel
     private SelectionMode selectionMode = SelectionMode.Single;
 
     public bool IsViewSelectionMode => SelectionMode == SelectionMode.View;
+
+    [ObservableProperty]
+    private float occlusionThreshold = 2.0f;
+
+    [ObservableProperty]
+    private bool showOctahedron = false;
+
+    [ObservableProperty]
+    private int octahedronResolution = 4;
+
+    partial void OnOctahedronResolutionChanged(int value)
+    {
+        RebuildOctahedron();
+    }
+
+    [ObservableProperty]
+    private LineGeometry3D? octahedronLines;
+
+    private List<Vector3> octahedronWorldVertices = new();
+    private Vector3 octahedronCenter;
 
     // Key: (MeshNode, triangleLoc), Value: 3 world-space vertex positions (slightly offset to avoid z-fighting)
     private readonly Dictionary<(MeshNode, int), (Vector3, Vector3, Vector3)> selectedTriangles = new();
@@ -349,6 +372,7 @@ public partial class MainViewModel : DemoCore.BaseViewModel
                     }
 
                     CollectMaterials();
+                    RebuildOctahedron();
 
                     if (XRayMode)
                         XRayModeFunct(true);
@@ -480,15 +504,25 @@ public partial class MainViewModel : DemoCore.BaseViewModel
         }
     }
 
-    public void HandleTriangleSelection(HitTestResult hit)
+    public void HandleTriangleSelection(HitTestResult hit, bool shiftDown = false)
     {
-        if (SelectionMode != SelectionMode.Single)
-            return;
-
         if (hit.ModelHit is not MeshNode meshNode || hit.Tag is not int loc || hit.TriangleIndices is null)
             return;
 
         if (meshNode.Geometry is not MeshGeometry3D srcMesh || srcMesh.Positions is null)
+            return;
+
+        // Shift+click deselects in any mode; try both key conventions (octree Tag=idx*3, non-octree Tag=idx/3)
+        if (shiftDown)
+        {
+            var key1 = (meshNode, loc);
+            var key2 = (meshNode, loc * 3);
+            if (selectedTriangles.Remove(key1) || selectedTriangles.Remove(key2))
+                RebuildSelectionMesh();
+            return;
+        }
+
+        if (SelectionMode != SelectionMode.Single)
             return;
 
         var key = (meshNode, loc);
@@ -520,6 +554,70 @@ public partial class MainViewModel : DemoCore.BaseViewModel
             var offset = normal * 0.001f;
             selectedTriangles[key] = (p0 + offset, p1 + offset, p2 + offset);
         }
+
+        RebuildSelectionMesh();
+    }
+
+    [RelayCommand]
+    private void InvertVisibleSelection()
+    {
+        var visibleNodes = new HashSet<MeshNode>();
+        foreach (var mat in MaterialItems)
+        {
+            if (mat.IsVisible)
+            {
+                foreach (var node in mat.MeshNodes)
+                    visibleNodes.Add(node);
+            }
+        }
+
+        foreach (var meshNode in visibleNodes)
+        {
+            var geom = meshNode.Geometry as MeshGeometry3D;
+            if (geom?.Positions is null || geom.Indices is null)
+                continue;
+
+            var transform = meshNode.TotalModelMatrix;
+            var indices = geom.Indices;
+
+            for (int i = 0; i < indices.Count; i += 3)
+            {
+                var key = (meshNode, i);
+                if (selectedTriangles.ContainsKey(key))
+                {
+                    selectedTriangles.Remove(key);
+                }
+                else
+                {
+                    var p0 = Vector3.Transform(geom.Positions[indices[i]], transform);
+                    var p1 = Vector3.Transform(geom.Positions[indices[i + 1]], transform);
+                    var p2 = Vector3.Transform(geom.Positions[indices[i + 2]], transform);
+                    var normal = Vector3.Normalize(Vector3.Cross(p1 - p0, p2 - p0));
+                    var offset = normal * 0.001f;
+                    selectedTriangles[key] = (p0 + offset, p1 + offset, p2 + offset);
+                }
+            }
+        }
+
+        RebuildSelectionMesh();
+    }
+
+    [RelayCommand]
+    private void ClearVisibleSelection()
+    {
+        var visibleNodes = new HashSet<MeshNode>();
+        foreach (var mat in MaterialItems)
+        {
+            if (mat.IsVisible)
+            {
+                foreach (var node in mat.MeshNodes)
+                    visibleNodes.Add(node);
+            }
+        }
+
+        var toRemove = selectedTriangles.Keys.Where(k => visibleNodes.Contains(k.Item1)).ToList();
+        foreach (var key in toRemove)
+            selectedTriangles.Remove(key);
 
         RebuildSelectionMesh();
     }
@@ -588,7 +686,8 @@ public partial class MainViewModel : DemoCore.BaseViewModel
             var centroid = (p0 + p1 + p2) / 3f;
             var centroidDist = (centroid - camPos).Length();
             var hitDist = (nearest.PointHit - camPos).Length();
-            if (hitDist >= centroidDist - 0.01f)
+            var tolerance = centroidDist * (OcclusionThreshold / 100f);
+            if (hitDist >= centroidDist - tolerance)
             {
                 var normal = Vector3.Normalize(Vector3.Cross(p1 - p0, p2 - p0));
                 var offset = normal * 0.001f;
@@ -597,6 +696,53 @@ public partial class MainViewModel : DemoCore.BaseViewModel
         }
 
         RebuildSelectionMesh();
+    }
+
+    [RelayCommand]
+    private async Task IterateViews()
+    {
+        if (Camera is null || octahedronWorldVertices.Count == 0)
+            return;
+
+        // Save camera state
+        var savedPos = Camera.Position;
+        var savedLook = Camera.LookDirection;
+        var savedUp = Camera.UpDirection;
+        var savedWidth = (Camera is OrthographicCamera oc) ? oc.Width : 0;
+
+        var lookTarget = octahedronCenter;
+        var maxWidth = Math.Max(Math.Max(ModelBound.Width, ModelBound.Height), ModelBound.Depth);
+
+        foreach (var vertexPos in octahedronWorldVertices)
+        {
+            // Move camera to octahedron vertex, look at octahedron bottom center
+            Camera.Position = vertexPos.ToPoint3D();
+            Camera.LookDirection = (lookTarget - vertexPos).ToVector3D();
+
+            // Compute a stable up vector that isn't parallel to the look direction
+            var look = Vector3.Normalize(lookTarget - vertexPos);
+            var up = Math.Abs(Vector3.Dot(look, Vector3.UnitY)) > 0.99f
+                ? Vector3.UnitZ
+                : Vector3.UnitY;
+            Camera.UpDirection = up.ToVector3D();
+
+            if (Camera is OrthographicCamera orthCam)
+                orthCam.Width = maxWidth;
+
+            // Wait for the viewport to render the new view
+            await Task.Delay(RenderWaitMs);
+
+            SelectCurrentView();
+        }
+
+        // Restore camera state
+        Camera.Position = savedPos;
+        Camera.LookDirection = savedLook;
+        Camera.UpDirection = savedUp;
+        if (Camera is OrthographicCamera orthCam2)
+            orthCam2.Width = savedWidth;
+
+        MessageBox.Show("Selection done!");
     }
 
     private void XRayModeFunct(bool enable)
@@ -666,5 +812,88 @@ public partial class MainViewModel : DemoCore.BaseViewModel
     {
         selectedTriangles.Clear();
         SelectionMesh = new MeshGeometry3D { Positions = new Vector3Collection(), Indices = new IntCollection() };
+    }
+
+    private void RebuildOctahedron()
+    {
+        var halfExtents = (ModelBound.Maximum - ModelBound.Minimum) / 2f;
+        // Octahedron vertices at ±axis scaled so all bounding box corners are inside
+        var r = halfExtents.X + halfExtents.Y + halfExtents.Z;
+        // Shift center so octahedron's equator (Y=0 vertices) aligns with mesh's min Y
+        var center = new Vector3(ModelBound.Center.X, ModelBound.Minimum.Y, ModelBound.Center.Z);
+        octahedronCenter = center;
+        if (r <= 0)
+        {
+            OctahedronLines = null;
+            return;
+        }
+
+        // Build subdivided upper-hemisphere octahedron (geodesic) projected onto sphere of radius r
+        var vertices = new List<Vector3>
+        {
+            new(0, 1, 0),
+            new(1, 0, 0), new(-1, 0, 0),
+            new(0, 0, 1), new(0, 0, -1)
+        };
+        var triangles = new List<(int, int, int)>
+        {
+            (0, 3, 1), (0, 1, 4), (0, 4, 2), (0, 2, 3)
+        };
+
+        int subdivisions = Math.Max(0, OctahedronResolution - 1);
+        for (int s = 0; s < subdivisions; s++)
+        {
+            var edgeMidpoints = new Dictionary<(int, int), int>();
+            var newTriangles = new List<(int, int, int)>();
+
+            int GetMidpoint(int a, int b)
+            {
+                var key = a < b ? (a, b) : (b, a);
+                if (edgeMidpoints.TryGetValue(key, out var mid))
+                    return mid;
+                var midVert = Vector3.Normalize((vertices[a] + vertices[b]) / 2f);
+                mid = vertices.Count;
+                vertices.Add(midVert);
+                edgeMidpoints[key] = mid;
+                return mid;
+            }
+
+            foreach (var (i0, i1, i2) in triangles)
+            {
+                var m01 = GetMidpoint(i0, i1);
+                var m12 = GetMidpoint(i1, i2);
+                var m02 = GetMidpoint(i0, i2);
+                newTriangles.Add((i0, m01, m02));
+                newTriangles.Add((m01, i1, m12));
+                newTriangles.Add((m02, m12, i2));
+                newTriangles.Add((m01, m12, m02));
+            }
+            triangles = newTriangles;
+        }
+
+        // Build line geometry from triangle edges
+        var edges = new HashSet<(int, int)>();
+        foreach (var (i0, i1, i2) in triangles)
+        {
+            edges.Add(i0 < i1 ? (i0, i1) : (i1, i0));
+            edges.Add(i1 < i2 ? (i1, i2) : (i2, i1));
+            edges.Add(i0 < i2 ? (i0, i2) : (i2, i0));
+        }
+
+        var linePositions = new Vector3Collection();
+        var lineIndices = new IntCollection();
+        foreach (var (a, b) in edges)
+        {
+            var idx = linePositions.Count;
+            linePositions.Add(center + vertices[a] * r);
+            linePositions.Add(center + vertices[b] * r);
+            lineIndices.Add(idx);
+            lineIndices.Add(idx + 1);
+        }
+        OctahedronLines = new LineGeometry3D { Positions = linePositions, Indices = lineIndices };
+
+        octahedronWorldVertices = new List<Vector3>(vertices.Count);
+        foreach (var v in vertices)
+            octahedronWorldVertices.Add(center + v * r);
     }
 }
