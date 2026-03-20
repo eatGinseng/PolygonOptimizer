@@ -5,6 +5,7 @@
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:hx="http://helix-toolkit.org/wpf/SharpDX"
         xmlns:local="clr-namespace:FileLoadDemo"
+        xmlns:sys="clr-namespace:System;assembly=mscorlib"
         mc:Ignorable="d"
         Title="FileLoadDemo"
         Width="1000"
@@ -12,6 +13,13 @@
     <Grid>
         <Grid.Resources>
             <BooleanToVisibilityConverter x:Key="boolToVisibilityConverter" />
+            <ObjectDataProvider x:Key="SelectionModeValues"
+                                MethodName="GetValues"
+                                ObjectType="{x:Type sys:Enum}">
+                <ObjectDataProvider.MethodParameters>
+                    <x:Type TypeName="local:SelectionMode" />
+                </ObjectDataProvider.MethodParameters>
+            </ObjectDataProvider>
         </Grid.Resources>
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
@@ -98,6 +106,7 @@
               VerticalAlignment="Stretch">
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
                 <RowDefinition Height="*" />
             </Grid.RowDefinitions>
             <StackPanel Margin="4"
@@ -113,6 +122,16 @@
                           IsChecked="{Binding RenderFlat}">Flat Shading</CheckBox>
                 <CheckBox Margin="4"
                           IsChecked="{Binding XRayMode}">X-Ray Mode</CheckBox>
+                <Separator />
+                <TextBlock>Selection Mode</TextBlock>
+                <ComboBox Margin="4"
+                          SelectedItem="{Binding SelectionMode}"
+                          ItemsSource="{Binding Source={StaticResource SelectionModeValues}}" />
+                <Button Margin="4"
+                        Command="{Binding SelectCurrentViewCommand}"
+                        Visibility="{Binding IsViewSelectionMode, Converter={StaticResource boolToVisibilityConverter}}">
+                    Select Current View
+                </Button>
                 <Separator />
                 <TextBlock>Animations</TextBlock>
                 <ComboBox DisplayMemberPath="Name"
@@ -144,9 +163,27 @@
                             Value="{Binding CurrAnimationTime}" />
                 </StackPanel>
                 <Separator />
+            </StackPanel>
+            <StackPanel Grid.Row="1" Margin="4">
+                <TextBlock>Materials</TextBlock>
+                <ItemsControl ItemsSource="{Binding MaterialItems}" MaxHeight="150">
+                    <ItemsControl.Template>
+                        <ControlTemplate TargetType="ItemsControl">
+                            <ScrollViewer VerticalScrollBarVisibility="Auto">
+                                <ItemsPresenter />
+                            </ScrollViewer>
+                        </ControlTemplate>
+                    </ItemsControl.Template>
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <CheckBox Margin="2" IsChecked="{Binding IsVisible}" Content="{Binding Name}" />
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+                <Separator Margin="0,4" />
                 <TextBlock>Scene Graph</TextBlock>
             </StackPanel>
-            <ScrollViewer Grid.Row="1">
+            <ScrollViewer Grid.Row="2">
                 <TreeView ItemsSource="{Binding GroupModel.GroupNode.Items}">
                     <TreeView.ItemContainerStyle>
                         <Style TargetType="TreeViewItem">

@@ -23,6 +23,12 @@ using Point3D = System.Windows.Media.Media3D.Point3D;
 
 namespace FileLoadDemo;
 
+public enum SelectionMode
+{
+    Single,
+    View
+}
+
 public partial class MainViewModel : DemoCore.BaseViewModel
 {
     private readonly string OpenFileFilter = $"{HelixToolkit.SharpDX.Assimp.Importer.SupportedFormatsString}";
@@ -37,6 +43,12 @@ public partial class MainViewModel : DemoCore.BaseViewModel
 
     [ObservableProperty]
     private Material selectionMaterial = new DiffuseMaterial() { DiffuseColor = Color.Yellow };
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(IsViewSelectionMode))]
+    private SelectionMode selectionMode = SelectionMode.Single;
+
+    public bool IsViewSelectionMode => SelectionMode == SelectionMode.View;
 
     // Key: (MeshNode, triangleLoc), Value: 3 world-space vertex positions (slightly offset to avoid z-fighting)
     private readonly Dictionary<(MeshNode, int), (Vector3, Vector3, Vector3)> selectedTriangles = new();
@@ -92,6 +104,8 @@ public partial class MainViewModel : DemoCore.BaseViewModel
     }
 
     public ObservableCollection<IAnimationUpdater> Animations { get; } = new();
+
+    public ObservableCollection<MaterialItem> MaterialItems { get; } = new();
 
     public SceneNodeGroupModel3D GroupModel { get; } = new SceneNodeGroupModel3D();
 
@@ -334,6 +348,8 @@ public partial class MainViewModel : DemoCore.BaseViewModel
                         }
                     }
 
+                    CollectMaterials();
+
                     if (XRayMode)
                         XRayModeFunct(true);
 
@@ -466,6 +482,9 @@ public partial class MainViewModel : DemoCore.BaseViewModel
 
     public void HandleTriangleSelection(HitTestResult hit)
     {
+        if (SelectionMode != SelectionMode.Single)
+            return;
+
         if (hit.ModelHit is not MeshNode meshNode || hit.Tag is not int loc || hit.TriangleIndices is null)
             return;
 
@@ -489,10 +508,92 @@ public partial class MainViewModel : DemoCore.BaseViewModel
             var p1 = Vector3.Transform(srcMesh.Positions[i1], transform);
             var p2 = Vector3.Transform(srcMesh.Positions[i2], transform);
 
-            // Offset slightly along the triangle normal to avoid z-fighting
+            // Backface check: skip if triangle faces away from camera
             var normal = Vector3.Normalize(Vector3.Cross(p1 - p0, p2 - p0));
+            if (Camera is null) return;
+            var camPos = Camera.Position.ToVector3();
+            var viewDir = Vector3.Normalize((p0 + p1 + p2) / 3f - camPos);
+            if (Vector3.Dot(normal, viewDir) > 0)
+                return;
+
+            // Offset slightly along the triangle normal to avoid z-fighting
             var offset = normal * 0.001f;
             selectedTriangles[key] = (p0 + offset, p1 + offset, p2 + offset);
+        }
+
+        RebuildSelectionMesh();
+    }
+
+    [RelayCommand]
+    private void SelectCurrentView()
+    {
+        var viewport = mainWindow?.view;
+        if (viewport is null || Camera is null)
+            return;
+
+        var camPos = Camera.Position.ToVector3();
+        var vpWidth = (float)viewport.ActualWidth;
+        var vpHeight = (float)viewport.ActualHeight;
+
+        // Collect all front-facing, in-viewport triangle candidates
+        var candidates = new List<(MeshNode node, int loc, Vector3 p0, Vector3 p1, Vector3 p2, Vector2 screenCenter)>();
+
+        foreach (var node in GroupModel.GroupNode.Items.PreorderDFT(n => n.IsRenderable))
+        {
+            if (node is not MeshNode meshNode || !meshNode.Visible)
+                continue;
+
+            var geom = meshNode.Geometry as MeshGeometry3D;
+            if (geom?.Positions is null || geom.Indices is null)
+                continue;
+
+            var transform = meshNode.TotalModelMatrix;
+            var indices = geom.Indices;
+
+            for (int i = 0; i < indices.Count; i += 3)
+            {
+                var p0 = Vector3.Transform(geom.Positions[indices[i]], transform);
+                var p1 = Vector3.Transform(geom.Positions[indices[i + 1]], transform);
+                var p2 = Vector3.Transform(geom.Positions[indices[i + 2]], transform);
+
+                // Backface cull
+                var normal = Vector3.Cross(p1 - p0, p2 - p0);
+                var centroid = (p0 + p1 + p2) / 3f;
+                var viewDir = centroid - camPos;
+                if (Vector3.Dot(normal, viewDir) > 0)
+                    continue;
+
+                // Project centroid to screen
+                var screenPt = viewport.Project(centroid);
+                if (screenPt.X < 0 || screenPt.X >= vpWidth || screenPt.Y < 0 || screenPt.Y >= vpHeight)
+                    continue;
+
+                candidates.Add((meshNode, i, p0, p1, p2, screenPt));
+            }
+        }
+
+        // For each candidate, hit test at its screen position to check occlusion
+        foreach (var (meshNode, loc, p0, p1, p2, screenCenter) in candidates)
+        {
+            var key = (meshNode, loc);
+            if (selectedTriangles.ContainsKey(key))
+                continue;
+
+            var hits = viewport.FindHits(new System.Windows.Point(screenCenter.X, screenCenter.Y));
+            if (hits.Count == 0)
+                continue;
+
+            // Compare distance: if nearest hit is at roughly the same distance as our triangle centroid, it's not occluded
+            var nearest = hits[0];
+            var centroid = (p0 + p1 + p2) / 3f;
+            var centroidDist = (centroid - camPos).Length();
+            var hitDist = (nearest.PointHit - camPos).Length();
+            if (hitDist >= centroidDist - 0.01f)
+            {
+                var normal = Vector3.Normalize(Vector3.Cross(p1 - p0, p2 - p0));
+                var offset = normal * 0.001f;
+                selectedTriangles[key] = (p0 + offset, p1 + offset, p2 + offset);
+            }
         }
 
         RebuildSelectionMesh();
@@ -525,8 +626,12 @@ public partial class MainViewModel : DemoCore.BaseViewModel
         var positions = new Vector3Collection();
         var indices = new IntCollection();
         int idx = 0;
-        foreach (var (p0, p1, p2) in selectedTriangles.Values)
+        foreach (var entry in selectedTriangles)
         {
+            if (!entry.Key.Item1.Visible)
+                continue;
+
+            var (p0, p1, p2) = entry.Value;
             positions.Add(p0);
             positions.Add(p1);
             positions.Add(p2);
@@ -535,6 +640,26 @@ public partial class MainViewModel : DemoCore.BaseViewModel
             indices.Add(idx++);
         }
         SelectionMesh = new MeshGeometry3D { Positions = positions, Indices = indices };
+    }
+
+    private void CollectMaterials()
+    {
+        MaterialItems.Clear();
+        var materialMap = new Dictionary<Guid, MaterialItem>();
+
+        foreach (var node in GroupModel.GroupNode.Items.PreorderDFT(n => true))
+        {
+            if (node is MeshNode m && m.Material is MaterialCore mat)
+            {
+                if (!materialMap.TryGetValue(mat.Guid, out var item))
+                {
+                    item = new MaterialItem(mat.Name) { VisibilityChanged = RebuildSelectionMesh };
+                    materialMap[mat.Guid] = item;
+                    MaterialItems.Add(item);
+                }
+                item.MeshNodes.Add(m);
+            }
+        }
     }
 
     private void ClearTriangleSelection()
