@@ -17,9 +17,15 @@ using System.Linq;
 using System.Numerics;
 using System.Threading;
 using System.Threading.Tasks;
+using System.IO;
 using System.Windows;
+using System.Windows.Media;
+using System.Windows.Media.Imaging;
 using MeshGeometry3D = HelixToolkit.SharpDX.MeshGeometry3D;
 using Point3D = System.Windows.Media.Media3D.Point3D;
+using Transform3D = System.Windows.Media.Media3D.Transform3D;
+using MatrixTransform3D = System.Windows.Media.Media3D.MatrixTransform3D;
+using Matrix3D = System.Windows.Media.Media3D.Matrix3D;
 
 namespace FileLoadDemo;
 
@@ -34,6 +40,35 @@ public partial class MainViewModel : DemoCore.BaseViewModel
 {
     private const int RenderWaitMs = 25;
 
+    // Background gradient colors (top to bottom)
+    private static readonly byte GradientTopR = 0xC0, GradientTopG = 0xC0, GradientTopB = 0xC0;       // Light grey
+    private static readonly byte GradientBottomR = 0x40, GradientBottomG = 0x40, GradientBottomB = 0x40; // Dark grey
+
+    // Selection highlight color (RGBA — alpha controls opacity over wireframe)
+    private static readonly Color4 SelectionColor = new(1f, 1f, 0f, 0.7f);
+
+    // Material ID palette (up to 8 muted/greyish colors, cycled for additional materials)
+    private static readonly Color4[] MaterialPalette = new Color4[]
+    {
+        new(0.55f, 0.42f, 0.40f, 1), // Muted red
+        new(0.42f, 0.52f, 0.42f, 1), // Muted green
+        new(0.42f, 0.45f, 0.55f, 1), // Muted blue
+        new(0.55f, 0.52f, 0.40f, 1), // Muted yellow
+        new(0.50f, 0.42f, 0.52f, 1), // Muted purple
+        new(0.40f, 0.52f, 0.52f, 1), // Muted cyan
+        new(0.55f, 0.47f, 0.40f, 1), // Muted orange
+        new(0.50f, 0.45f, 0.42f, 1), // Muted brown
+    };
+
+    [ObservableProperty]
+    private MeshGeometry3D? backgroundGradientMesh;
+
+    [ObservableProperty]
+    private Material? backgroundGradientMaterial;
+
+    [ObservableProperty]
+    private Transform3D backgroundGradientTransform = Transform3D.Identity;
+
     private readonly string OpenFileFilter = $"{HelixToolkit.SharpDX.Assimp.Importer.SupportedFormatsString}";
     private readonly string ExportFileFilter = $"{HelixToolkit.SharpDX.Assimp.Exporter.SupportedFormatsString}";
 
@@ -45,7 +80,7 @@ public partial class MainViewModel : DemoCore.BaseViewModel
     };
 
     [ObservableProperty]
-    private Material selectionMaterial = new DiffuseMaterial() { DiffuseColor = Color.Yellow };
+    private Material selectionMaterial = new DiffuseMaterial() { DiffuseColor = SelectionColor };
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(IsViewSelectionMode))]
@@ -54,10 +89,28 @@ public partial class MainViewModel : DemoCore.BaseViewModel
     public bool IsViewSelectionMode => SelectionMode == SelectionMode.View;
 
     [ObservableProperty]
+    private bool showUV = false;
+
+    partial void OnShowUVChanged(bool value)
+    {
+        if (value)
+            RebuildUVMap();
+    }
+
+    [ObservableProperty]
+    private Geometry? uvWireframe;
+
+    [ObservableProperty]
+    private Geometry? uvSelectionFill;
+
+    [ObservableProperty]
     private float occlusionThreshold = 2.0f;
 
     [ObservableProperty]
     private bool showOctahedron = false;
+
+    [ObservableProperty]
+    private float iterateCameraWidth = 2.0f;
 
     [ObservableProperty]
     private int octahedronResolution = 4;
@@ -75,6 +128,9 @@ public partial class MainViewModel : DemoCore.BaseViewModel
 
     // Key: (MeshNode, triangleLoc), Value: 3 world-space vertex positions (slightly offset to avoid z-fighting)
     private readonly Dictionary<(MeshNode, int), (Vector3, Vector3, Vector3)> selectedTriangles = new();
+
+    // Undo stack: each entry stores indices snapshot and selection state before a deletion
+    private readonly Stack<(Dictionary<MeshNode, IntCollection> indices, Dictionary<(MeshNode, int), (Vector3, Vector3, Vector3)> selection)> deleteUndoStack = new();
 
     [ObservableProperty]
     private int selectedTriangleCount = 0;
@@ -175,7 +231,6 @@ public partial class MainViewModel : DemoCore.BaseViewModel
 
     [ObservableProperty]
     private BoundingBox modelBound = new();
-    public TextureModel? EnvironmentMap { get; }
 
     private readonly SynchronizationContext? context = SynchronizationContext.Current;
     private HelixToolkitScene? scene;
@@ -202,7 +257,68 @@ public partial class MainViewModel : DemoCore.BaseViewModel
             NearPlaneDistance = 0.1f
         };
 
-        EnvironmentMap = TextureModel.Create("Cubemap_Grandcanyon.dds");
+        InitBackgroundGradient();
+        Camera.Changed += (s, e) => UpdateBackgroundTransform();
+    }
+
+    private void InitBackgroundGradient()
+    {
+        // Create a 1x256 gradient texture
+        var pixels = new byte[256 * 4];
+        for (int y = 0; y < 256; y++)
+        {
+            float t = y / 255f;
+            pixels[y * 4 + 0] = (byte)(GradientBottomB * t + GradientTopB * (1 - t));
+            pixels[y * 4 + 1] = (byte)(GradientBottomG * t + GradientTopG * (1 - t));
+            pixels[y * 4 + 2] = (byte)(GradientBottomR * t + GradientTopR * (1 - t));
+            pixels[y * 4 + 3] = 255;
+        }
+        var bitmap = new WriteableBitmap(1, 256, 96, 96, PixelFormats.Bgra32, null);
+        bitmap.WritePixels(new Int32Rect(0, 0, 1, 256), pixels, 4, 0);
+        bitmap.Freeze();
+
+        var ms = new MemoryStream();
+        var encoder = new PngBitmapEncoder();
+        encoder.Frames.Add(BitmapFrame.Create(bitmap));
+        encoder.Save(ms);
+
+        BackgroundGradientMesh = new MeshGeometry3D
+        {
+            Positions = new Vector3Collection { new(-1, 1, 0), new(1, 1, 0), new(1, -1, 0), new(-1, -1, 0) },
+            Indices = new IntCollection { 0, 1, 2, 0, 2, 3 },
+            TextureCoordinates = new Vector2Collection { new(0, 0), new(1, 0), new(1, 1), new(0, 1) }
+        };
+
+        BackgroundGradientMaterial = new DiffuseMaterial()
+        {
+            DiffuseColor = HelixToolkit.Maths.Color.White,
+            DiffuseMap = TextureModel.Create(new MemoryStream(ms.ToArray()))
+        };
+
+        UpdateBackgroundTransform();
+    }
+
+    private void UpdateBackgroundTransform()
+    {
+        if (Camera is null) return;
+
+        var lookDir = Camera.LookDirection.ToVector3();
+        var upDir = Camera.UpDirection.ToVector3();
+        var camPos = Camera.Position.ToVector3();
+
+        var forward = Vector3.Normalize(lookDir);
+        var right = Vector3.Normalize(Vector3.Cross(Vector3.Normalize(upDir), forward));
+        var up = Vector3.Cross(forward, right);
+
+        float scale = 4000f;
+        var pos = camPos + forward * 4500f;
+
+        BackgroundGradientTransform = new MatrixTransform3D(new Matrix3D(
+            right.X * scale, right.Y * scale, right.Z * scale, 0,
+            up.X * scale, up.Y * scale, up.Z * scale, 0,
+            forward.X, forward.Y, forward.Z, 0,
+            pos.X, pos.Y, pos.Z, 1
+        ));
     }
 
     [RelayCommand]
@@ -287,6 +403,7 @@ public partial class MainViewModel : DemoCore.BaseViewModel
         SelectedAnimation = null;
         Animations.Clear();
         ClearTriangleSelection();
+        deleteUndoStack.Clear();
 
         var oldNodes = GroupModel.SceneNode.Items.ToArray();
         GroupModel.Clear(false);
@@ -309,8 +426,12 @@ public partial class MainViewModel : DemoCore.BaseViewModel
         XRayMode = false;
         ShowOctahedron = false;
         OctahedronResolution = 4;
+        IterateCameraWidth = 2.0f;
         SelectionMode = SelectionMode.Single;
         OcclusionThreshold = 2.0f;
+        ShowUV = false;
+        UvWireframe = null;
+        UvSelectionFill = null;
 
         ResetCamera();
     }
@@ -380,25 +501,6 @@ public partial class MainViewModel : DemoCore.BaseViewModel
                 {
                     if (scene.Root is not null)
                     {
-                        foreach (var node in scene.Root.Traverse())
-                        {
-                            if (node is MaterialGeometryNode m)
-                            {
-                                //m.Geometry.SetAsTransient();
-                                if (m.Material is PBRMaterialCore pbr)
-                                {
-                                    pbr.RenderEnvironmentMap = true;
-                                }
-                                else if (m.Material is PhongMaterialCore phong)
-                                {
-                                    phong.RenderEnvironmentMap = true;
-                                }
-                            }
-                        }
-                    }
-
-                    if (scene.Root is not null)
-                    {
                         GroupModel.AddNode(scene.Root);
                     }
 
@@ -421,6 +523,7 @@ public partial class MainViewModel : DemoCore.BaseViewModel
 
                     CollectMaterials();
                     RebuildOctahedron();
+                    RebuildUVMap();
 
                     if (XRayMode)
                         XRayModeFunct(true);
@@ -552,7 +655,82 @@ public partial class MainViewModel : DemoCore.BaseViewModel
         }
     }
 
-    public void HandleTriangleSelection(HitTestResult hit, bool shiftDown = false)
+    public void HandleUVSelection(System.Windows.Point uvPoint, bool shiftDown)
+    {
+        var visibleNodes = new HashSet<MeshNode>();
+        foreach (var mat in MaterialItems)
+        {
+            if (mat.IsVisible)
+                foreach (var node in mat.MeshNodes)
+                    visibleNodes.Add(node);
+        }
+
+        foreach (var meshNode in visibleNodes)
+        {
+            var geom = meshNode.Geometry as MeshGeometry3D;
+            if (geom?.TextureCoordinates is null || geom.Indices is null || geom.Positions is null)
+                continue;
+
+            var uvs = geom.TextureCoordinates;
+            var indices = geom.Indices;
+
+            for (int i = 0; i < indices.Count; i += 3)
+            {
+                var uv0 = uvs[indices[i]];
+                var uv1 = uvs[indices[i + 1]];
+                var uv2 = uvs[indices[i + 2]];
+
+                if (!PointInTriangle(uvPoint, uv0, uv1, uv2))
+                    continue;
+
+                var key = (meshNode, i);
+
+                if (shiftDown)
+                {
+                    if (selectedTriangles.Remove(key))
+                        RebuildSelectionMesh();
+                    return;
+                }
+
+                if (selectedTriangles.ContainsKey(key))
+                {
+                    selectedTriangles.Remove(key);
+                }
+                else
+                {
+                    var transform = meshNode.TotalModelMatrix;
+                    var p0 = Vector3.Transform(geom.Positions[indices[i]], transform);
+                    var p1 = Vector3.Transform(geom.Positions[indices[i + 1]], transform);
+                    var p2 = Vector3.Transform(geom.Positions[indices[i + 2]], transform);
+                    var normal = Vector3.Normalize(Vector3.Cross(p1 - p0, p2 - p0));
+                    var offset = normal * 0.001f;
+                    selectedTriangles[key] = (p0 + offset, p1 + offset, p2 + offset);
+                }
+
+                RebuildSelectionMesh();
+                return;
+            }
+        }
+    }
+
+    private static bool PointInTriangle(System.Windows.Point p, Vector2 a, Vector2 b, Vector2 c)
+    {
+        float px = (float)p.X, py = (float)p.Y;
+        float ax = a.X, ay = a.Y;
+        float bx = b.X, by = b.Y;
+        float cx = c.X, cy = c.Y;
+
+        float d1 = (px - bx) * (ay - by) - (ax - bx) * (py - by);
+        float d2 = (px - cx) * (by - cy) - (bx - cx) * (py - cy);
+        float d3 = (px - ax) * (cy - ay) - (cx - ax) * (py - ay);
+
+        bool hasNeg = (d1 < 0) || (d2 < 0) || (d3 < 0);
+        bool hasPos = (d1 > 0) || (d2 > 0) || (d3 > 0);
+
+        return !(hasNeg && hasPos);
+    }
+
+    public void HandleTriangleSelection(HelixToolkit.SharpDX.HitTestResult hit, bool shiftDown = false)
     {
         if (hit.ModelHit is not MeshNode meshNode || hit.Tag is not int loc || hit.TriangleIndices is null)
             return;
@@ -671,6 +849,90 @@ public partial class MainViewModel : DemoCore.BaseViewModel
     }
 
     [RelayCommand]
+    private void DeleteTriangles()
+    {
+        if (selectedTriangles.Count == 0)
+            return;
+
+        // Group selected triangles by mesh node
+        var byNode = new Dictionary<MeshNode, List<int>>();
+        foreach (var (meshNode, loc) in selectedTriangles.Keys)
+        {
+            if (!byNode.TryGetValue(meshNode, out var list))
+            {
+                list = new List<int>();
+                byNode[meshNode] = list;
+            }
+            list.Add(loc);
+        }
+
+        // Save snapshot of current indices and selection for undo
+        var indicesSnapshot = new Dictionary<MeshNode, IntCollection>();
+        foreach (var kvp in byNode)
+        {
+            var geom = kvp.Key.Geometry as MeshGeometry3D;
+            if (geom?.Indices is not null)
+                indicesSnapshot[kvp.Key] = new IntCollection(geom.Indices);
+        }
+        var selectionSnapshot = new Dictionary<(MeshNode, int), (Vector3, Vector3, Vector3)>(selectedTriangles);
+        deleteUndoStack.Push((indicesSnapshot, selectionSnapshot));
+
+        // For each mesh node, rebuild indices excluding selected triangles
+        foreach (var kvp in byNode)
+        {
+            var meshNode = kvp.Key;
+            var locsToDelete = kvp.Value;
+            var geom = meshNode.Geometry as MeshGeometry3D;
+            if (geom?.Indices is null)
+                continue;
+
+            var deleteSet = new HashSet<int>(locsToDelete);
+            var oldIndices = geom.Indices;
+            var newIndices = new IntCollection();
+
+            for (int i = 0; i < oldIndices.Count; i += 3)
+            {
+                if (!deleteSet.Contains(i))
+                {
+                    newIndices.Add(oldIndices[i]);
+                    newIndices.Add(oldIndices[i + 1]);
+                    newIndices.Add(oldIndices[i + 2]);
+                }
+            }
+
+            geom.Indices = newIndices;
+            geom.UpdateTriangles();
+        }
+
+        selectedTriangles.Clear();
+        RebuildSelectionMesh();
+    }
+
+    [RelayCommand]
+    private void UndoDelete()
+    {
+        if (deleteUndoStack.Count == 0)
+            return;
+
+        var (indicesSnapshot, selectionSnapshot) = deleteUndoStack.Pop();
+        foreach (var kvp in indicesSnapshot)
+        {
+            var geom = kvp.Key.Geometry as MeshGeometry3D;
+            if (geom is null)
+                continue;
+
+            geom.Indices = kvp.Value;
+            geom.UpdateTriangles();
+        }
+
+        selectedTriangles.Clear();
+        foreach (var kvp in selectionSnapshot)
+            selectedTriangles[kvp.Key] = kvp.Value;
+
+        RebuildSelectionMesh();
+    }
+
+    [RelayCommand]
     private void SelectCurrentView()
     {
         var viewport = mainWindow?.view;
@@ -760,6 +1022,7 @@ public partial class MainViewModel : DemoCore.BaseViewModel
 
         var lookTarget = octahedronCenter;
         var maxWidth = Math.Max(Math.Max(ModelBound.Width, ModelBound.Height), ModelBound.Depth);
+        var iterateWidth = maxWidth * IterateCameraWidth;
 
         foreach (var vertexPos in octahedronWorldVertices)
         {
@@ -775,7 +1038,7 @@ public partial class MainViewModel : DemoCore.BaseViewModel
             Camera.UpDirection = up.ToVector3D();
 
             if (Camera is OrthographicCamera orthCam)
-                orthCam.Width = maxWidth;
+                orthCam.Width = iterateWidth;
 
             // Wait for the viewport to render the new view
             await Task.Delay(RenderWaitMs);
@@ -835,12 +1098,14 @@ public partial class MainViewModel : DemoCore.BaseViewModel
         }
         SelectionMesh = new MeshGeometry3D { Positions = positions, Indices = indices };
         UpdateTriangleCounts();
+        RebuildUVMap();
     }
 
     private void CollectMaterials()
     {
         MaterialItems.Clear();
         var materialMap = new Dictionary<Guid, MaterialItem>();
+        int colorIndex = 0;
 
         foreach (var node in GroupModel.GroupNode.Items.PreorderDFT(n => true))
         {
@@ -848,9 +1113,23 @@ public partial class MainViewModel : DemoCore.BaseViewModel
             {
                 if (!materialMap.TryGetValue(mat.Guid, out var item))
                 {
-                    item = new MaterialItem(mat.Name) { VisibilityChanged = RebuildSelectionMesh };
+                    item = new MaterialItem(mat.Name) { VisibilityChanged = () => { RebuildSelectionMesh(); RebuildUVMap(); } };
                     materialMap[mat.Guid] = item;
                     MaterialItems.Add(item);
+
+                    // Assign palette color to this material
+                    var color = MaterialPalette[colorIndex % MaterialPalette.Length];
+                    colorIndex++;
+                    if (mat is PhongMaterialCore phong)
+                    {
+                        phong.DiffuseColor = color;
+                        phong.DiffuseMap = null;
+                    }
+                    else if (mat is PBRMaterialCore pbr)
+                    {
+                        pbr.AlbedoColor = color;
+                        pbr.AlbedoMap = null;
+                    }
                 }
                 item.MeshNodes.Add(m);
             }
@@ -863,7 +1142,7 @@ public partial class MainViewModel : DemoCore.BaseViewModel
         SelectedTriangleCount = selectedTriangles.Count;
 
         int total = 0;
-        foreach (var node in GroupModel.GroupNode.Items.PreorderDFT(n => n.IsRenderable))
+        foreach (var node in GroupModel.GroupNode.Items.PreorderDFT(n => true))
         {
             if (node is MeshNode m && m.Geometry is MeshGeometry3D geom && geom.Indices is not null)
                 total += geom.Indices.Count / 3;
@@ -876,6 +1155,68 @@ public partial class MainViewModel : DemoCore.BaseViewModel
         selectedTriangles.Clear();
         SelectionMesh = new MeshGeometry3D { Positions = new Vector3Collection(), Indices = new IntCollection() };
         UpdateTriangleCounts();
+    }
+
+    private void RebuildUVMap()
+    {
+        if (!ShowUV)
+            return;
+
+        var visibleNodes = new HashSet<MeshNode>();
+        foreach (var mat in MaterialItems)
+        {
+            if (mat.IsVisible)
+                foreach (var node in mat.MeshNodes)
+                    visibleNodes.Add(node);
+        }
+
+        var wireframe = new StreamGeometry();
+        var selection = new StreamGeometry();
+
+        using (var wCtx = wireframe.Open())
+        using (var sCtx = selection.Open())
+        {
+            foreach (var meshNode in visibleNodes)
+            {
+                var geom = meshNode.Geometry as MeshGeometry3D;
+                if (geom?.TextureCoordinates is null || geom.Indices is null)
+                    continue;
+
+                var uvs = geom.TextureCoordinates;
+                var indices = geom.Indices;
+
+                for (int i = 0; i < indices.Count; i += 3)
+                {
+                    var uv0 = uvs[indices[i]];
+                    var uv1 = uvs[indices[i + 1]];
+                    var uv2 = uvs[indices[i + 2]];
+
+                    // U: left to right, V: top to bottom
+                    var p0 = new System.Windows.Point(uv0.X, uv0.Y);
+                    var p1 = new System.Windows.Point(uv1.X, uv1.Y);
+                    var p2 = new System.Windows.Point(uv2.X, uv2.Y);
+
+                    // Wireframe triangle
+                    wCtx.BeginFigure(p0, false, true);
+                    wCtx.LineTo(p1, true, false);
+                    wCtx.LineTo(p2, true, false);
+
+                    // Selected triangle fill
+                    var key = (meshNode, i);
+                    if (selectedTriangles.ContainsKey(key))
+                    {
+                        sCtx.BeginFigure(p0, true, true);
+                        sCtx.LineTo(p1, true, false);
+                        sCtx.LineTo(p2, true, false);
+                    }
+                }
+            }
+        }
+
+        wireframe.Freeze();
+        selection.Freeze();
+        UvWireframe = wireframe;
+        UvSelectionFill = selection;
     }
 
     private void RebuildOctahedron()

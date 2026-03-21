@@ -29,76 +29,94 @@
             <ColumnDefinition Width="*" />
             <ColumnDefinition Width="Auto" />
         </Grid.ColumnDefinitions>
-        <hx:Viewport3DX x:Name="view"
-                        Grid.Row="1"
-                        BackgroundColor="#595959"
-                        Camera="{Binding Camera}"
-                        EffectsManager="{Binding EffectsManager}"
-                        EnableSwapChainRendering="False"
-                        EnableSSAO="True"
-                        FXAALevel="Low"
-                        FixedRotationPoint="{Binding ModelCentroid}"
-                        FixedRotationPointEnabled="True">
-            <hx:Viewport3DX.InputBindings>
-                <KeyBinding Key="B"
-                            Command="hx:ViewportCommands.BackView" />
-                <KeyBinding Key="F"
-                            Command="hx:ViewportCommands.FrontView" />
-                <KeyBinding Key="U"
-                            Command="hx:ViewportCommands.TopView" />
-                <KeyBinding Key="D"
-                            Command="hx:ViewportCommands.BottomView" />
-                <KeyBinding Key="L"
-                            Command="hx:ViewportCommands.LeftView" />
-                <KeyBinding Key="R"
-                            Command="hx:ViewportCommands.RightView" />
-                <KeyBinding Command="hx:ViewportCommands.ZoomExtents"
-                            Gesture="Control+E" />
-                <MouseBinding Command="hx:ViewportCommands.Rotate"
-                              Gesture="RightClick" />
-                <MouseBinding Command="hx:ViewportCommands.Zoom"
-                              Gesture="MiddleClick" />
-                <MouseBinding Command="hx:ViewportCommands.Pan"
-                              Gesture="LeftClick" />
-            </hx:Viewport3DX.InputBindings>
-            <hx:AmbientLight3D Color="#363636" />
-            <hx:DirectionalLight3D Direction="{Binding Camera.LookDirection}"
-                                   Color="#D6D6D6" />
-            <hx:EnvironmentMap3D IsRendering="{Binding RenderEnvironmentMap}"
-                                 Texture="{Binding EnvironmentMap}" />
-            <hx:Element3DPresenter Content="{Binding GroupModel}" />
-            <hx:MeshGeometryModel3D Geometry="{Binding SelectionMesh}" Material="{Binding SelectionMaterial}" IsHitTestVisible="False" />
-            <hx:LineGeometryModel3D Geometry="{Binding OctahedronLines}"
-                                    Color="Cyan"
-                                    IsRendering="{Binding ShowOctahedron}" />
-        </hx:Viewport3DX>
-        <Border Grid.Row="1"
-                Panel.ZIndex="1000"
-                Background="#CC000000"
-                CornerRadius="4"
-                Padding="8,4"
-                Margin="10"
-                HorizontalAlignment="Left"
-                VerticalAlignment="Top"
-                IsHitTestVisible="False">
-            <TextBlock Text="{Binding SelectionStats}"
-                       Foreground="Yellow"
-                       FontSize="16"
-                       FontWeight="Bold"
-                       FontFamily="Consolas" />
-        </Border>
-        <Grid Grid.Row="1"
-              Background="#7B363636"
-              Visibility="{Binding IsLoading, Converter={StaticResource boolToVisibilityConverter}}">
-            <StackPanel HorizontalAlignment="Center"
-                        VerticalAlignment="Center"
-                        Orientation="Vertical">
-                <TextBlock Foreground="White">Loading Model</TextBlock>
-                <ProgressBar Grid.Row="1"
-                             Width="200"
-                             Height="30"
-                             IsIndeterminate="True" />
-            </StackPanel>
+        <Grid Grid.Row="1">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition>
+                    <ColumnDefinition.Style>
+                        <Style TargetType="ColumnDefinition">
+                            <Setter Property="Width" Value="0" />
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding ShowUV}" Value="True">
+                                    <Setter Property="Width" Value="*" />
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </ColumnDefinition.Style>
+                </ColumnDefinition>
+            </Grid.ColumnDefinitions>
+            <!-- 3D Viewport -->
+            <Grid Grid.Column="0">
+                <hx:Viewport3DX x:Name="view"
+                                BackgroundColor="#808080"
+                                Camera="{Binding Camera}"
+                                EffectsManager="{Binding EffectsManager}"
+                                EnableSwapChainRendering="True"
+                                EnableSSAO="True"
+                                FXAALevel="Low"
+                                FixedRotationPoint="{Binding ModelCentroid}"
+                                FixedRotationPointEnabled="True">
+                    <hx:Viewport3DX.InputBindings>
+                        <KeyBinding Key="B"
+                                    Command="hx:ViewportCommands.BackView" />
+                        <KeyBinding Key="F"
+                                    Command="hx:ViewportCommands.FrontView" />
+                        <KeyBinding Key="U"
+                                    Command="hx:ViewportCommands.TopView" />
+                        <KeyBinding Key="D"
+                                    Command="hx:ViewportCommands.BottomView" />
+                        <KeyBinding Key="L"
+                                    Command="hx:ViewportCommands.LeftView" />
+                        <KeyBinding Key="R"
+                                    Command="hx:ViewportCommands.RightView" />
+                        <KeyBinding Command="hx:ViewportCommands.ZoomExtents"
+                                    Gesture="Control+E" />
+                        <MouseBinding Command="hx:ViewportCommands.Rotate"
+                                      Gesture="RightClick" />
+                        <MouseBinding Command="hx:ViewportCommands.Zoom"
+                                      Gesture="MiddleClick" />
+                        <MouseBinding Command="hx:ViewportCommands.Pan"
+                                      Gesture="LeftClick" />
+                    </hx:Viewport3DX.InputBindings>
+                    <hx:MeshGeometryModel3D Geometry="{Binding BackgroundGradientMesh}"
+                                            Material="{Binding BackgroundGradientMaterial}"
+                                            Transform="{Binding BackgroundGradientTransform}"
+                                            CullMode="None"
+                                            IsHitTestVisible="False" />
+                    <hx:AmbientLight3D Color="#363636" />
+                    <hx:DirectionalLight3D Direction="{Binding Camera.LookDirection}"
+                                           Color="#D6D6D6" />
+                    <hx:Element3DPresenter Content="{Binding GroupModel}" />
+                    <hx:MeshGeometryModel3D Geometry="{Binding SelectionMesh}" Material="{Binding SelectionMaterial}" IsTransparent="True" IsHitTestVisible="False" />
+                    <hx:LineGeometryModel3D Geometry="{Binding OctahedronLines}"
+                                            Color="Cyan"
+                                            IsRendering="{Binding ShowOctahedron}" />
+                </hx:Viewport3DX>
+                <Grid Background="#7B363636"
+                      Visibility="{Binding IsLoading, Converter={StaticResource boolToVisibilityConverter}}">
+                    <StackPanel HorizontalAlignment="Center"
+                                VerticalAlignment="Center"
+                                Orientation="Vertical">
+                        <TextBlock Foreground="White">Loading Model</TextBlock>
+                        <ProgressBar Width="200"
+                                     Height="30"
+                                     IsIndeterminate="True" />
+                    </StackPanel>
+                </Grid>
+            </Grid>
+            <!-- UV Viewport -->
+            <Grid Grid.Column="1" Background="#404040" ClipToBounds="True"
+                  MouseLeftButtonDown="UVPanel_MouseLeftButtonDown">
+                <Viewbox Stretch="Uniform">
+                    <Canvas x:Name="uvCanvas" Width="1" Height="1">
+                        <Canvas.Background>
+                            <SolidColorBrush Color="#404040" />
+                        </Canvas.Background>
+                        <Path Data="{Binding UvSelectionFill}" Fill="#80FFFF00" />
+                        <Path Data="{Binding UvWireframe}" Stroke="#AAFFFFFF" StrokeThickness="0.002" />
+                    </Canvas>
+                </Viewbox>
+            </Grid>
         </Grid>
         <Menu Grid.Row="0"
               Height="20"
@@ -117,6 +135,11 @@
                 <MenuItem Command="{Binding CopyAsHiresBitmapCommand}"
                           Header="Copy as Hiresolution Bitmap (1920x1080)" />
             </MenuItem>
+            <MenuItem Header="View">
+                <MenuItem Header="Show UV"
+                          IsCheckable="True"
+                          IsChecked="{Binding ShowUV}" />
+            </MenuItem>
         </Menu>
 
         <Grid Grid.Row="1"
@@ -131,6 +154,13 @@
             <StackPanel Margin="4"
                         HorizontalAlignment="Stretch"
                         Orientation="Vertical">
+                <TextBlock Text="{Binding SelectionStats}"
+                           Foreground="DarkOrange"
+                           FontSize="13"
+                           FontWeight="Bold"
+                           FontFamily="Consolas"
+                           Margin="0,0,0,4" />
+                <Separator />
                 <Button Command="{Binding ResetCameraCommand}">
                     Reset Camera
                 </Button>
@@ -173,9 +203,24 @@
                     <TextBox Width="40" Margin="4,0"
                              Text="{Binding OctahedronResolution, UpdateSourceTrigger=PropertyChanged}" />
                 </StackPanel>
+                <StackPanel Margin="4" Orientation="Horizontal">
+                    <TextBlock VerticalAlignment="Center">Camera Width:</TextBlock>
+                    <TextBox Width="50" Margin="4,0"
+                             Text="{Binding IterateCameraWidth, UpdateSourceTrigger=PropertyChanged}" />
+                </StackPanel>
                 <Button Margin="4"
                         Command="{Binding IterateViewsCommand}">
                     Iterate Views
+                </Button>
+                <Separator />
+                <TextBlock>Edit Geometry</TextBlock>
+                <Button Margin="4"
+                        Command="{Binding DeleteTrianglesCommand}">
+                    Delete Triangles
+                </Button>
+                <Button Margin="4"
+                        Command="{Binding UndoDeleteCommand}">
+                    Undo
                 </Button>
                 <Separator />
                 <TextBlock>Animations</TextBlock>

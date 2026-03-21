@@ -48,4 +48,16 @@ public partial class MainWindow : Window
 
         Closed += (s, e) => (DataContext as IDisposable)?.Dispose();
     }
+
+    private void UVPanel_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        if (DataContext is not MainViewModel vm)
+            return;
+
+        // GetPosition relative to the Canvas gives us UV coordinates directly
+        // because the Canvas is 1x1 and the Viewbox handles the scaling
+        var uvPoint = e.GetPosition(uvCanvas);
+        bool shiftDown = (Keyboard.Modifiers & ModifierKeys.Shift) != 0;
+        vm.HandleUVSelection(uvPoint, shiftDown);
+    }
 }
