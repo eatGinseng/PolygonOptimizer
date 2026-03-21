@@ -34,7 +34,7 @@
                         BackgroundColor="#595959"
                         Camera="{Binding Camera}"
                         EffectsManager="{Binding EffectsManager}"
-                        EnableSwapChainRendering="True"
+                        EnableSwapChainRendering="False"
                         EnableSSAO="True"
                         FXAALevel="Low"
                         FixedRotationPoint="{Binding ModelCentroid}"
@@ -72,6 +72,21 @@
                                     Color="Cyan"
                                     IsRendering="{Binding ShowOctahedron}" />
         </hx:Viewport3DX>
+        <Border Grid.Row="1"
+                Panel.ZIndex="1000"
+                Background="#CC000000"
+                CornerRadius="4"
+                Padding="8,4"
+                Margin="10"
+                HorizontalAlignment="Left"
+                VerticalAlignment="Top"
+                IsHitTestVisible="False">
+            <TextBlock Text="{Binding SelectionStats}"
+                       Foreground="Yellow"
+                       FontSize="16"
+                       FontWeight="Bold"
+                       FontFamily="Consolas" />
+        </Border>
         <Grid Grid.Row="1"
               Background="#7B363636"
               Visibility="{Binding IsLoading, Converter={StaticResource boolToVisibilityConverter}}">
@@ -91,6 +106,8 @@
             <MenuItem Header="File">
                 <MenuItem Command="{Binding OpenFileCommand}"
                           Header="Open File" />
+                <MenuItem Command="{Binding CloseFileCommand}"
+                          Header="Close File" />
                 <MenuItem Command="{Binding ExportCommand}"
                           Header="Export" />
             </MenuItem>

@@ -77,6 +77,19 @@ public partial class MainViewModel : DemoCore.BaseViewModel
     private readonly Dictionary<(MeshNode, int), (Vector3, Vector3, Vector3)> selectedTriangles = new();
 
     [ObservableProperty]
+    private int selectedTriangleCount = 0;
+
+    [ObservableProperty]
+    private int totalTriangleCount = 0;
+
+    public string SelectionStats => TotalTriangleCount > 0
+        ? string.Format("Selected: {0} / {1} ({2:F1}%)", SelectedTriangleCount, TotalTriangleCount, 100.0 * SelectedTriangleCount / TotalTriangleCount)
+        : "Selected: 0 / 0 (0.0%)";
+
+    partial void OnSelectedTriangleCountChanged(int value) => OnPropertyChanged(nameof(SelectionStats));
+    partial void OnTotalTriangleCountChanged(int value) => OnPropertyChanged(nameof(SelectionStats));
+
+    [ObservableProperty]
     private bool showWireframe = false;
 
     partial void OnShowWireframeChanged(bool value)
@@ -265,6 +278,41 @@ public partial class MainViewModel : DemoCore.BaseViewModel
         {
             Debug.WriteLine(e);
         }
+    }
+
+    [RelayCommand]
+    private void CloseFile()
+    {
+        StopAnimation();
+        SelectedAnimation = null;
+        Animations.Clear();
+        ClearTriangleSelection();
+
+        var oldNodes = GroupModel.SceneNode.Items.ToArray();
+        GroupModel.Clear(false);
+        Task.Run(() =>
+        {
+            foreach (var node in oldNodes)
+                node.Dispose();
+        });
+
+        scene = null;
+        MaterialItems.Clear();
+        OctahedronLines = null;
+        octahedronWorldVertices.Clear();
+
+        ModelBound = new BoundingBox();
+        ModelCentroid = default;
+
+        ShowWireframe = false;
+        RenderFlat = false;
+        XRayMode = false;
+        ShowOctahedron = false;
+        OctahedronResolution = 4;
+        SelectionMode = SelectionMode.Single;
+        OcclusionThreshold = 2.0f;
+
+        ResetCamera();
     }
 
     [RelayCommand]
@@ -786,6 +834,7 @@ public partial class MainViewModel : DemoCore.BaseViewModel
             indices.Add(idx++);
         }
         SelectionMesh = new MeshGeometry3D { Positions = positions, Indices = indices };
+        UpdateTriangleCounts();
     }
 
     private void CollectMaterials()
@@ -806,12 +855,27 @@ public partial class MainViewModel : DemoCore.BaseViewModel
                 item.MeshNodes.Add(m);
             }
         }
+        UpdateTriangleCounts();
+    }
+
+    private void UpdateTriangleCounts()
+    {
+        SelectedTriangleCount = selectedTriangles.Count;
+
+        int total = 0;
+        foreach (var node in GroupModel.GroupNode.Items.PreorderDFT(n => n.IsRenderable))
+        {
+            if (node is MeshNode m && m.Geometry is MeshGeometry3D geom && geom.Indices is not null)
+                total += geom.Indices.Count / 3;
+        }
+        TotalTriangleCount = total;
     }
 
     private void ClearTriangleSelection()
     {
         selectedTriangles.Clear();
         SelectionMesh = new MeshGeometry3D { Positions = new Vector3Collection(), Indices = new IntCollection() };
+        UpdateTriangleCounts();
     }
 
     private void RebuildOctahedron()
