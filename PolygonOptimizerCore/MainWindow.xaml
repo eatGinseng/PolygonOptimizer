@@ -7,9 +7,12 @@
         xmlns:local="clr-namespace:FileLoadDemo"
         xmlns:sys="clr-namespace:System;assembly=mscorlib"
         mc:Ignorable="d"
-        Title="FileLoadDemo"
-        Width="1000"
+        Title="Polygon Optimizer"
+        Width="1250"
         Height="800">
+    <Window.InputBindings>
+        <KeyBinding Key="Delete" Command="{Binding DeleteTrianglesCommand}" />
+    </Window.InputBindings>
     <Grid>
         <Grid.Resources>
             <BooleanToVisibilityConverter x:Key="boolToVisibilityConverter" />
@@ -27,6 +30,7 @@
         </Grid.RowDefinitions>
         <Grid.ColumnDefinitions>
             <ColumnDefinition Width="*" />
+            <ColumnDefinition Width="Auto" />
             <ColumnDefinition Width="Auto" />
         </Grid.ColumnDefinitions>
         <Grid Grid.Row="1">
@@ -46,7 +50,7 @@
                 </ColumnDefinition>
             </Grid.ColumnDefinitions>
             <!-- 3D Viewport -->
-            <Grid Grid.Column="0">
+            <Grid x:Name="viewportGrid" Grid.Column="0" Background="Transparent">
                 <hx:Viewport3DX x:Name="view"
                                 BackgroundColor="#808080"
                                 Camera="{Binding Camera}"
@@ -75,8 +79,6 @@
                                       Gesture="RightClick" />
                         <MouseBinding Command="hx:ViewportCommands.Zoom"
                                       Gesture="MiddleClick" />
-                        <MouseBinding Command="hx:ViewportCommands.Pan"
-                                      Gesture="LeftClick" />
                     </hx:Viewport3DX.InputBindings>
                     <hx:MeshGeometryModel3D Geometry="{Binding BackgroundGradientMesh}"
                                             Material="{Binding BackgroundGradientMaterial}"
@@ -87,10 +89,14 @@
                     <hx:DirectionalLight3D Direction="{Binding Camera.LookDirection}"
                                            Color="#D6D6D6" />
                     <hx:Element3DPresenter Content="{Binding GroupModel}" />
-                    <hx:MeshGeometryModel3D Geometry="{Binding SelectionMesh}" Material="{Binding SelectionMaterial}" IsTransparent="True" IsHitTestVisible="False" />
+                    <hx:MeshGeometryModel3D Geometry="{Binding SelectionMesh}" Material="{Binding SelectionMaterial}" IsTransparent="True" CullMode="None" IsHitTestVisible="False" />
                     <hx:LineGeometryModel3D Geometry="{Binding OctahedronLines}"
                                             Color="Cyan"
                                             IsRendering="{Binding ShowOctahedron}" />
+                    <hx:LineGeometryModel3D Geometry="{Binding SelectionRectGeometry}"
+                                            Color="Yellow"
+                                            Thickness="0.75"
+                                            IsHitTestVisible="False" />
                 </hx:Viewport3DX>
                 <Grid Background="#7B363636"
                       Visibility="{Binding IsLoading, Converter={StaticResource boolToVisibilityConverter}}">
@@ -105,8 +111,10 @@
                 </Grid>
             </Grid>
             <!-- UV Viewport -->
-            <Grid Grid.Column="1" Background="#404040" ClipToBounds="True"
-                  MouseLeftButtonDown="UVPanel_MouseLeftButtonDown">
+            <Grid x:Name="uvGrid" Grid.Column="1" Background="#404040" ClipToBounds="True"
+                  MouseLeftButtonDown="UVPanel_MouseLeftButtonDown"
+                  MouseMove="UVPanel_MouseMove"
+                  MouseLeftButtonUp="UVPanel_MouseLeftButtonUp">
                 <Viewbox Stretch="Uniform">
                     <Canvas x:Name="uvCanvas" Width="1" Height="1">
                         <Canvas.Background>
@@ -114,6 +122,7 @@
                         </Canvas.Background>
                         <Path Data="{Binding UvSelectionFill}" Fill="#80FFFF00" />
                         <Path Data="{Binding UvWireframe}" Stroke="#AAFFFFFF" StrokeThickness="0.002" />
+                        <Path x:Name="uvSelectionRect" Stroke="Yellow" StrokeThickness="0.002" />
                     </Canvas>
                 </Viewbox>
             </Grid>
@@ -129,184 +138,200 @@
                 <MenuItem Command="{Binding ExportCommand}"
                           Header="Export" />
             </MenuItem>
+            <MenuItem Header="View">
+                <MenuItem Header="Show UV"
+                          IsCheckable="True"
+                          IsChecked="{Binding ShowUV}" />
+            </MenuItem>
             <MenuItem Header="Edit">
                 <MenuItem Command="{Binding CopyAsBitmapCommand}"
                           Header="Copy As Bitmap (Window Size)" />
                 <MenuItem Command="{Binding CopyAsHiresBitmapCommand}"
                           Header="Copy as Hiresolution Bitmap (1920x1080)" />
             </MenuItem>
-            <MenuItem Header="View">
-                <MenuItem Header="Show UV"
-                          IsCheckable="True"
-                          IsChecked="{Binding ShowUV}" />
-            </MenuItem>
         </Menu>
 
+        <ScrollViewer Grid.Row="1"
+                      Grid.Column="1"
+                      Width="250"
+                      VerticalScrollBarVisibility="Auto">
+            <StackPanel Margin="2">
+                <!-- Stats -->
+                <Border Background="#2D2D2D" CornerRadius="3" Margin="2" Padding="6">
+                    <TextBlock Text="{Binding SelectionStats}"
+                               Foreground="#FFB833"
+                               FontSize="14"
+                               FontWeight="Bold"
+                               FontFamily="Consolas" />
+                </Border>
+
+                <!-- Display -->
+                <Border BorderBrush="#CCCCCC" BorderThickness="1" CornerRadius="3" Margin="2" Padding="4">
+                    <StackPanel>
+                        <TextBlock FontWeight="SemiBold" Margin="0,0,0,2">Display</TextBlock>
+                        <Button Command="{Binding ResetCameraCommand}">Reset Camera</Button>
+                        <CheckBox Margin="0,4" IsChecked="{Binding ShowWireframe}">Show Wireframe</CheckBox>
+                        <CheckBox Margin="0,2" IsChecked="{Binding RenderFlat}">Flat Shading</CheckBox>
+                        <CheckBox Margin="0,2" IsChecked="{Binding XRayMode}">X-Ray Mode</CheckBox>
+                        <CheckBox Margin="0,2" IsChecked="{Binding ShowBackface}">Show Backface</CheckBox>
+                    </StackPanel>
+                </Border>
+
+                <!-- Selection -->
+                <Border BorderBrush="#CCCCCC" BorderThickness="1" CornerRadius="3" Margin="2" Padding="4">
+                    <StackPanel>
+                        <TextBlock FontWeight="SemiBold" Margin="0,0,0,2">Selection</TextBlock>
+                        <ComboBox Margin="0,2"
+                                  SelectedItem="{Binding SelectionMode}"
+                                  ItemsSource="{Binding Source={StaticResource SelectionModeValues}}" />
+                        <StackPanel Margin="0,2" Orientation="Horizontal"
+                                    Visibility="{Binding IsViewSelectionMode, Converter={StaticResource boolToVisibilityConverter}}">
+                            <TextBlock VerticalAlignment="Center">Threshold (%):</TextBlock>
+                            <TextBox Width="50" Margin="4,0" Text="{Binding OcclusionThreshold, UpdateSourceTrigger=PropertyChanged}" />
+                        </StackPanel>
+                        <Button Margin="0,2"
+                                Command="{Binding SelectCurrentViewCommand}"
+                                Visibility="{Binding IsViewSelectionMode, Converter={StaticResource boolToVisibilityConverter}}">
+                            Select Current View
+                        </Button>
+                        <Grid Margin="0,2">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <Button Grid.Column="0" Margin="0,0,2,0"
+                                    Command="{Binding InvertVisibleSelectionCommand}">Invert</Button>
+                            <Button Grid.Column="1" Margin="2,0,0,0"
+                                    Command="{Binding ClearVisibleSelectionCommand}">Clear</Button>
+                        </Grid>
+                        <CheckBox Margin="0,4" IsChecked="{Binding IgnoreBackfacing}">Ignore Backfacing</CheckBox>
+                        <CheckBox Margin="0,2" IsChecked="{Binding SelectConnected}">Select Connected</CheckBox>
+                    </StackPanel>
+                </Border>
+
+                <!-- Iterate Views -->
+                <Border BorderBrush="#CCCCCC" BorderThickness="1" CornerRadius="3" Margin="2" Padding="4">
+                    <StackPanel>
+                        <TextBlock FontWeight="SemiBold" Margin="0,0,0,2">Iterate Views</TextBlock>
+                        <CheckBox Margin="0,2" IsChecked="{Binding ShowOctahedron}">Show Octahedron</CheckBox>
+                        <StackPanel Margin="0,2" Orientation="Horizontal">
+                            <TextBlock VerticalAlignment="Center">Resolution:</TextBlock>
+                            <TextBox Width="40" Margin="4,0"
+                                     Text="{Binding OctahedronResolution, UpdateSourceTrigger=PropertyChanged}" />
+                        </StackPanel>
+                        <StackPanel Margin="0,2" Orientation="Horizontal">
+                            <TextBlock VerticalAlignment="Center">Camera Width:</TextBlock>
+                            <TextBox Width="50" Margin="4,0"
+                                     Text="{Binding IterateCameraWidth, UpdateSourceTrigger=PropertyChanged}" />
+                        </StackPanel>
+                        <Button Margin="0,2" Command="{Binding IterateViewsCommand}">Iterate Views</Button>
+                    </StackPanel>
+                </Border>
+
+                <!-- Edit Geometry -->
+                <Border BorderBrush="#CCCCCC" BorderThickness="1" CornerRadius="3" Margin="2" Padding="4">
+                    <StackPanel>
+                        <TextBlock FontWeight="SemiBold" Margin="0,0,0,2">Edit Geometry</TextBlock>
+                        <Button Margin="0,2" Command="{Binding DeleteTrianglesCommand}">Delete Triangles</Button>
+                        <Button Margin="0,2" Command="{Binding UndoDeleteCommand}">Undo</Button>
+                    </StackPanel>
+                </Border>
+
+                <!-- Materials -->
+                <Border BorderBrush="#CCCCCC" BorderThickness="1" CornerRadius="3" Margin="2" Padding="4">
+                    <StackPanel>
+                        <TextBlock FontWeight="SemiBold" Margin="0,0,0,2">Materials</TextBlock>
+                        <ItemsControl ItemsSource="{Binding MaterialItems}" MaxHeight="150">
+                            <ItemsControl.Template>
+                                <ControlTemplate TargetType="ItemsControl">
+                                    <ScrollViewer VerticalScrollBarVisibility="Auto">
+                                        <ItemsPresenter />
+                                    </ScrollViewer>
+                                </ControlTemplate>
+                            </ItemsControl.Template>
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <CheckBox Margin="2" IsChecked="{Binding IsVisible}" Content="{Binding Name}" />
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </StackPanel>
+                </Border>
+            </StackPanel>
+        </ScrollViewer>
+
         <Grid Grid.Row="1"
-              Grid.Column="1"
+              Grid.Column="2"
               Width="250"
               VerticalAlignment="Stretch">
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto" />
-                <RowDefinition Height="Auto" />
                 <RowDefinition Height="*" />
             </Grid.RowDefinitions>
-            <StackPanel Margin="4"
-                        HorizontalAlignment="Stretch"
-                        Orientation="Vertical">
-                <TextBlock Text="{Binding SelectionStats}"
-                           Foreground="DarkOrange"
-                           FontSize="13"
-                           FontWeight="Bold"
-                           FontFamily="Consolas"
-                           Margin="0,0,0,4" />
-                <Separator />
-                <Button Command="{Binding ResetCameraCommand}">
-                    Reset Camera
-                </Button>
-                <Separator />
-                <CheckBox Margin="4"
-                          IsChecked="{Binding ShowWireframe}">Show Wireframe</CheckBox>
-                <CheckBox Margin="4"
-                          IsChecked="{Binding RenderFlat}">Flat Shading</CheckBox>
-                <CheckBox Margin="4"
-                          IsChecked="{Binding XRayMode}">X-Ray Mode</CheckBox>
-                <Separator />
-                <TextBlock>Selection Mode</TextBlock>
-                <ComboBox Margin="4"
-                          SelectedItem="{Binding SelectionMode}"
-                          ItemsSource="{Binding Source={StaticResource SelectionModeValues}}" />
-                <StackPanel Margin="4" Orientation="Horizontal"
-                            Visibility="{Binding IsViewSelectionMode, Converter={StaticResource boolToVisibilityConverter}}">
-                    <TextBlock VerticalAlignment="Center">Threshold (%):</TextBlock>
-                    <TextBox Width="50" Margin="4,0" Text="{Binding OcclusionThreshold, UpdateSourceTrigger=PropertyChanged}" />
-                </StackPanel>
-                <Button Margin="4"
-                        Command="{Binding SelectCurrentViewCommand}"
-                        Visibility="{Binding IsViewSelectionMode, Converter={StaticResource boolToVisibilityConverter}}">
-                    Select Current View
-                </Button>
-                <Button Margin="4"
-                        Command="{Binding InvertVisibleSelectionCommand}">
-                    Invert
-                </Button>
-                <Button Margin="4"
-                        Command="{Binding ClearVisibleSelectionCommand}">
-                    Clear
-                </Button>
-                <Separator />
-                <TextBlock>Iterate Properties</TextBlock>
-                <CheckBox Margin="4"
-                          IsChecked="{Binding ShowOctahedron}">Show Octahedron</CheckBox>
-                <StackPanel Margin="4" Orientation="Horizontal">
-                    <TextBlock VerticalAlignment="Center">Resolution:</TextBlock>
-                    <TextBox Width="40" Margin="4,0"
-                             Text="{Binding OctahedronResolution, UpdateSourceTrigger=PropertyChanged}" />
-                </StackPanel>
-                <StackPanel Margin="4" Orientation="Horizontal">
-                    <TextBlock VerticalAlignment="Center">Camera Width:</TextBlock>
-                    <TextBox Width="50" Margin="4,0"
-                             Text="{Binding IterateCameraWidth, UpdateSourceTrigger=PropertyChanged}" />
-                </StackPanel>
-                <Button Margin="4"
-                        Command="{Binding IterateViewsCommand}">
-                    Iterate Views
-                </Button>
-                <Separator />
-                <TextBlock>Edit Geometry</TextBlock>
-                <Button Margin="4"
-                        Command="{Binding DeleteTrianglesCommand}">
-                    Delete Triangles
-                </Button>
-                <Button Margin="4"
-                        Command="{Binding UndoDeleteCommand}">
-                    Undo
-                </Button>
-                <Separator />
-                <TextBlock>Animations</TextBlock>
-                <ComboBox DisplayMemberPath="Name"
-                          IsEnabled="{Binding ElementName=aniCheckbox, Path=IsChecked}"
-                          ItemsSource="{Binding Animations}"
-                          SelectedItem="{Binding SelectedAnimation}" />
-                <StackPanel Orientation="Vertical">
-                    <StackPanel Orientation="Horizontal">
-                        <Label Content="PlayBack Speed: " />
-                        <TextBlock VerticalAlignment="Center"
-                                   Text="{Binding Speed}" />
-                        <Button Command="{Binding PlayCommand}">Play</Button>
+            <StackPanel Margin="2">
+                <!-- Animations -->
+                <Border BorderBrush="#CCCCCC" BorderThickness="1" CornerRadius="3" Margin="2" Padding="4">
+                    <StackPanel>
+                        <TextBlock FontWeight="SemiBold" Margin="0,0,0,2">Animations</TextBlock>
+                        <ComboBox Margin="0,2"
+                                  DisplayMemberPath="Name"
+                                  IsEnabled="{Binding ElementName=aniCheckbox, Path=IsChecked}"
+                                  ItemsSource="{Binding Animations}"
+                                  SelectedItem="{Binding SelectedAnimation}" />
+                        <StackPanel Orientation="Horizontal" Margin="0,2">
+                            <Label Content="Speed:" Padding="0,0,4,0" VerticalAlignment="Center" />
+                            <TextBlock VerticalAlignment="Center" Text="{Binding Speed}" />
+                            <Button Margin="4,0,0,0" Command="{Binding PlayCommand}">Play</Button>
+                        </StackPanel>
+                        <Slider Maximum="50" Minimum="0" SmallChange="0.5" Value="{Binding Speed}" />
+                        <StackPanel Orientation="Horizontal" Margin="0,2">
+                            <TextBlock VerticalAlignment="Center">TimeStamp:</TextBlock>
+                            <TextBlock VerticalAlignment="Center" Margin="4,0" Text="{Binding CurrAnimationTime}" />
+                        </StackPanel>
+                        <Slider LargeChange="1"
+                                Maximum="{Binding EndTime}"
+                                Minimum="{Binding StartTime}"
+                                SmallChange="0.1"
+                                Value="{Binding CurrAnimationTime}" />
                     </StackPanel>
-
-                    <Slider Maximum="50"
-                            Minimum="0"
-                            SmallChange="0.5"
-                            Value="{Binding Speed}" />
-                    <Label>
-                        <TextBlock>
-                            <Run>TimeStamp:</Run>
-                            <Run Text="{Binding CurrAnimationTime}" />
-                        </TextBlock>
-                    </Label>
-                    <Slider LargeChange="1"
-                            Maximum="{Binding EndTime}"
-                            Minimum="{Binding StartTime}"
-                            SmallChange="0.1"
-                            Value="{Binding CurrAnimationTime}" />
-                </StackPanel>
-                <Separator />
+                </Border>
             </StackPanel>
-            <StackPanel Grid.Row="1" Margin="4">
-                <TextBlock>Materials</TextBlock>
-                <ItemsControl ItemsSource="{Binding MaterialItems}" MaxHeight="150">
-                    <ItemsControl.Template>
-                        <ControlTemplate TargetType="ItemsControl">
-                            <ScrollViewer VerticalScrollBarVisibility="Auto">
-                                <ItemsPresenter />
-                            </ScrollViewer>
-                        </ControlTemplate>
-                    </ItemsControl.Template>
-                    <ItemsControl.ItemTemplate>
-                        <DataTemplate>
-                            <CheckBox Margin="2" IsChecked="{Binding IsVisible}" Content="{Binding Name}" />
-                        </DataTemplate>
-                    </ItemsControl.ItemTemplate>
-                </ItemsControl>
-                <Separator Margin="0,4" />
-                <TextBlock>Scene Graph</TextBlock>
-            </StackPanel>
-            <ScrollViewer Grid.Row="2">
-                <TreeView ItemsSource="{Binding GroupModel.GroupNode.Items}">
-                    <TreeView.ItemContainerStyle>
-                        <Style TargetType="TreeViewItem">
-                            <Setter Property="IsSelected"
-                                    Value="{Binding Tag.Selected, Mode=TwoWay}" />
-                            <Setter Property="IsExpanded"
-                                    Value="{Binding Tag.Expanded, Mode=TwoWay}" />
-                        </Style>
-                    </TreeView.ItemContainerStyle>
-                    <TreeView.ItemTemplate>
-                        <HierarchicalDataTemplate ItemsSource="{Binding Items}">
-                            <TextBlock Text="{Binding Name}">
-                                <TextBlock.Style>
-                                    <Style TargetType="TextBlock">
-                                        <Style.Setters>
-                                            <Setter Property="Foreground"
-                                                    Value="Black" />
-                                        </Style.Setters>
-                                        <Style.Triggers>
-                                            <DataTrigger Binding="{Binding IsAnimationNode}"
-                                                         Value="true">
-                                                <Setter Property="Foreground"
-                                                        Value="Blue" />
-                                            </DataTrigger>
-                                        </Style.Triggers>
-                                    </Style>
-                                </TextBlock.Style>
-                            </TextBlock>
-                        </HierarchicalDataTemplate>
-                    </TreeView.ItemTemplate>
-                </TreeView>
-            </ScrollViewer>
-
+            <!-- Scene Graph -->
+            <Border Grid.Row="1" BorderBrush="#CCCCCC" BorderThickness="1" CornerRadius="3" Margin="4,2">
+                <DockPanel>
+                    <TextBlock DockPanel.Dock="Top" FontWeight="SemiBold" Margin="4,4,4,2">Scene Graph</TextBlock>
+                    <ScrollViewer VerticalScrollBarVisibility="Auto">
+                        <TreeView ItemsSource="{Binding GroupModel.GroupNode.Items}">
+                            <TreeView.ItemContainerStyle>
+                                <Style TargetType="TreeViewItem">
+                                    <Setter Property="IsSelected"
+                                            Value="{Binding Tag.Selected, Mode=TwoWay}" />
+                                    <Setter Property="IsExpanded"
+                                            Value="{Binding Tag.Expanded, Mode=TwoWay}" />
+                                </Style>
+                            </TreeView.ItemContainerStyle>
+                            <TreeView.ItemTemplate>
+                                <HierarchicalDataTemplate ItemsSource="{Binding Items}">
+                                    <TextBlock Text="{Binding Name}">
+                                        <TextBlock.Style>
+                                            <Style TargetType="TextBlock">
+                                                <Style.Setters>
+                                                    <Setter Property="Foreground" Value="Black" />
+                                                </Style.Setters>
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding IsAnimationNode}" Value="true">
+                                                        <Setter Property="Foreground" Value="Blue" />
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </TextBlock.Style>
+                                    </TextBlock>
+                                </HierarchicalDataTemplate>
+                            </TreeView.ItemTemplate>
+                        </TreeView>
+                    </ScrollViewer>
+                </DockPanel>
+            </Border>
         </Grid>
     </Grid>
 </Window>

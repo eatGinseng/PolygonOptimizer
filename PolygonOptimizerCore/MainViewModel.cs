@@ -47,6 +47,10 @@ public partial class MainViewModel : DemoCore.BaseViewModel
     // Selection highlight color (RGBA — alpha controls opacity over wireframe)
     private static readonly Color4 SelectionColor = new(1f, 1f, 0f, 0.7f);
 
+    // Wireframe color and post-effect stroke thickness
+    private static readonly Color4 WireframeColor = new(0f, 0f, 0f, 0.6f);
+    private const float WireframeThickness = 0.6f;
+
     // Material ID palette (up to 8 muted/greyish colors, cycled for additional materials)
     private static readonly Color4[] MaterialPalette = new Color4[]
     {
@@ -95,13 +99,30 @@ public partial class MainViewModel : DemoCore.BaseViewModel
     {
         if (value)
             RebuildUVMap();
+
+        // Expand/shrink window width to accommodate UV panel
+        if (mainWindow is not null)
+        {
+            var viewportWidth = mainWindow.view.ActualWidth;
+            if (viewportWidth <= 0) viewportWidth = 500;
+            mainWindow.Width += value ? viewportWidth : -viewportWidth;
+        }
     }
+
+    [ObservableProperty]
+    private LineGeometry3D? selectionRectGeometry;
 
     [ObservableProperty]
     private Geometry? uvWireframe;
 
     [ObservableProperty]
     private Geometry? uvSelectionFill;
+
+    [ObservableProperty]
+    private bool ignoreBackfacing = true;
+
+    [ObservableProperty]
+    private bool selectConnected = false;
 
     [ObservableProperty]
     private float occlusionThreshold = 2.0f;
@@ -146,7 +167,7 @@ public partial class MainViewModel : DemoCore.BaseViewModel
     partial void OnTotalTriangleCountChanged(int value) => OnPropertyChanged(nameof(SelectionStats));
 
     [ObservableProperty]
-    private bool showWireframe = false;
+    private bool showWireframe = true;
 
     partial void OnShowWireframeChanged(bool value)
     {
@@ -159,6 +180,14 @@ public partial class MainViewModel : DemoCore.BaseViewModel
     partial void OnRenderFlatChanged(bool value)
     {
         RenderFlatFunct(value);
+    }
+
+    [ObservableProperty]
+    private bool showBackface = false;
+
+    partial void OnShowBackfaceChanged(bool value)
+    {
+        SetCullMode(value);
     }
 
     [ObservableProperty]
@@ -234,6 +263,7 @@ public partial class MainViewModel : DemoCore.BaseViewModel
 
     private readonly SynchronizationContext? context = SynchronizationContext.Current;
     private HelixToolkitScene? scene;
+    private string? importedFilePath;
     private IAnimationUpdater? animationUpdater;
     private List<BoneSkinMeshNode> boneSkinNodes = new();
     private List<BoneSkinMeshNode> skeletonNodes = new();
@@ -324,14 +354,10 @@ public partial class MainViewModel : DemoCore.BaseViewModel
     [RelayCommand]
     private void ResetCamera()
     {
-        if (Camera is not OrthographicCamera c)
-        {
+        if (Camera is null)
             return;
-        }
 
-        c.Reset();
-        c.FarPlaneDistance = 5000;
-        c.NearPlaneDistance = 0.1f;
+        FocusCameraToScene();
     }
 
     [RelayCommand]
@@ -414,6 +440,7 @@ public partial class MainViewModel : DemoCore.BaseViewModel
         });
 
         scene = null;
+        importedFilePath = null;
         MaterialItems.Clear();
         OctahedronLines = null;
         octahedronWorldVertices.Clear();
@@ -421,8 +448,11 @@ public partial class MainViewModel : DemoCore.BaseViewModel
         ModelBound = new BoundingBox();
         ModelCentroid = default;
 
-        ShowWireframe = false;
+        ShowWireframe = true;
         RenderFlat = false;
+        ShowBackface = false;
+        IgnoreBackfacing = true;
+        SelectConnected = false;
         XRayMode = false;
         ShowOctahedron = false;
         OctahedronResolution = 4;
@@ -450,6 +480,7 @@ public partial class MainViewModel : DemoCore.BaseViewModel
             return;
         }
 
+        importedFilePath = path;
         StopAnimation();
         var syncContext = SynchronizationContext.Current;
         IsLoading = true;
@@ -525,6 +556,11 @@ public partial class MainViewModel : DemoCore.BaseViewModel
                     RebuildOctahedron();
                     RebuildUVMap();
 
+                    if (ShowWireframe || XRayMode)
+                        ShowWireframeFunct(ShowWireframe);
+
+                    SetCullMode(ShowBackface);
+
                     if (XRayMode)
                         XRayModeFunct(true);
 
@@ -582,7 +618,23 @@ public partial class MainViewModel : DemoCore.BaseViewModel
     [RelayCommand]
     private void Export()
     {
-        var index = SaveFileDialog(ExportFileFilter, out var path);
+        // Find default filter index matching the imported file's extension
+        int defaultFilterIndex = 0;
+        if (importedFilePath is not null)
+        {
+            var ext = System.IO.Path.GetExtension(importedFilePath).TrimStart('.').ToLowerInvariant();
+            var formats = HelixToolkit.SharpDX.Assimp.Exporter.SupportedFormats;
+            for (int i = 0; i < formats.Length; i++)
+            {
+                if (formats[i].FileExtension.ToLowerInvariant() == ext)
+                {
+                    defaultFilterIndex = i;
+                    break;
+                }
+            }
+        }
+
+        var index = SaveFileDialog(ExportFileFilter, defaultFilterIndex, out var path);
 
         if (!string.IsNullOrEmpty(path) && index >= 0)
         {
@@ -609,11 +661,21 @@ public partial class MainViewModel : DemoCore.BaseViewModel
         return null;
     }
 
-    private int SaveFileDialog(string filter, out string path)
+    private int SaveFileDialog(string filter, int defaultFilterIndex, out string path)
     {
+        var defaultFileName = "";
+        if (importedFilePath is not null)
+        {
+            var name = System.IO.Path.GetFileNameWithoutExtension(importedFilePath);
+            var ext = System.IO.Path.GetExtension(importedFilePath);
+            defaultFileName = name + "_reduced" + ext;
+        }
+
         var d = new SaveFileDialog
         {
-            Filter = filter
+            Filter = filter,
+            FilterIndex = defaultFilterIndex + 1, // FilterIndex is 1-based
+            FileName = defaultFileName
         };
 
         if (d.ShowDialog() == true)
@@ -633,7 +695,20 @@ public partial class MainViewModel : DemoCore.BaseViewModel
         foreach (var node in GroupModel.GroupNode.Items.PreorderDFT(node => node.IsRenderable))
         {
             if (node is MeshNode m)
+            {
                 m.RenderWireframe = show || XRayMode;
+                m.WireframeColor = WireframeColor;
+            }
+        }
+    }
+
+    private void SetCullMode(bool showBackface)
+    {
+        var mode = showBackface ? SharpDX.Direct3D11.CullMode.None : SharpDX.Direct3D11.CullMode.Back;
+        foreach (var node in GroupModel.GroupNode.Items.PreorderDFT(node => node.IsRenderable))
+        {
+            if (node is MeshNode m)
+                m.CullMode = mode;
         }
     }
 
@@ -655,17 +730,21 @@ public partial class MainViewModel : DemoCore.BaseViewModel
         }
     }
 
-    public void HandleUVSelection(System.Windows.Point uvPoint, bool shiftDown)
+    private HashSet<MeshNode> GetVisibleMeshNodes()
     {
-        var visibleNodes = new HashSet<MeshNode>();
+        var nodes = new HashSet<MeshNode>();
         foreach (var mat in MaterialItems)
         {
             if (mat.IsVisible)
                 foreach (var node in mat.MeshNodes)
-                    visibleNodes.Add(node);
+                    nodes.Add(node);
         }
+        return nodes;
+    }
 
-        foreach (var meshNode in visibleNodes)
+    public void HandleUVSelection(System.Windows.Point uvPoint, bool shiftDown)
+    {
+        foreach (var meshNode in GetVisibleMeshNodes())
         {
             var geom = meshNode.Geometry as MeshGeometry3D;
             if (geom?.TextureCoordinates is null || geom.Indices is null || geom.Positions is null)
@@ -713,6 +792,326 @@ public partial class MainViewModel : DemoCore.BaseViewModel
         }
     }
 
+    public void HandleUVFloodFillSelection(System.Windows.Point uvPoint, bool shiftDown)
+    {
+        // Find the clicked triangle in UV space
+        MeshNode? hitNode = null;
+        int hitLoc = -1;
+
+        foreach (var meshNode in GetVisibleMeshNodes())
+        {
+            var geom = meshNode.Geometry as MeshGeometry3D;
+            if (geom?.TextureCoordinates is null || geom.Indices is null || geom.Positions is null)
+                continue;
+
+            var uvs = geom.TextureCoordinates;
+            var indices = geom.Indices;
+
+            for (int i = 0; i < indices.Count; i += 3)
+            {
+                if (PointInTriangle(uvPoint, uvs[indices[i]], uvs[indices[i + 1]], uvs[indices[i + 2]]))
+                {
+                    hitNode = meshNode;
+                    hitLoc = i;
+                    break;
+                }
+            }
+            if (hitNode is not null) break;
+        }
+
+        if (hitNode is null || hitLoc < 0) return;
+
+        var srcMesh = hitNode.Geometry as MeshGeometry3D;
+        if (srcMesh?.TextureCoordinates is null || srcMesh.Indices is null || srcMesh.Positions is null)
+            return;
+
+        var meshIndices = srcMesh.Indices;
+        var meshUVs = srcMesh.TextureCoordinates;
+
+        // Build UV-space edge adjacency: edge defined by two UV coordinate pairs (rounded to avoid float issues)
+        var edgeToTriangles = new Dictionary<(long, long), List<int>>();
+
+        for (int i = 0; i < meshIndices.Count; i += 3)
+        {
+            var u0 = PackUV(meshUVs[meshIndices[i]]);
+            var u1 = PackUV(meshUVs[meshIndices[i + 1]]);
+            var u2 = PackUV(meshUVs[meshIndices[i + 2]]);
+            AddUVEdge(edgeToTriangles, u0, u1, i);
+            AddUVEdge(edgeToTriangles, u1, u2, i);
+            AddUVEdge(edgeToTriangles, u0, u2, i);
+        }
+
+        // BFS flood fill in UV space
+        var visited = new HashSet<int>();
+        var queue = new Queue<int>();
+        queue.Enqueue(hitLoc);
+        visited.Add(hitLoc);
+
+        while (queue.Count > 0)
+        {
+            var tri = queue.Dequeue();
+            var u0 = PackUV(meshUVs[meshIndices[tri]]);
+            var u1 = PackUV(meshUVs[meshIndices[tri + 1]]);
+            var u2 = PackUV(meshUVs[meshIndices[tri + 2]]);
+
+            foreach (var edge in new[] { SortUVEdge(u0, u1), SortUVEdge(u1, u2), SortUVEdge(u0, u2) })
+            {
+                if (edgeToTriangles.TryGetValue(edge, out var neighbors))
+                {
+                    foreach (var neighbor in neighbors)
+                    {
+                        if (visited.Add(neighbor))
+                            queue.Enqueue(neighbor);
+                    }
+                }
+            }
+        }
+
+        // Select or deselect all connected triangles
+        var transform = hitNode.TotalModelMatrix;
+        foreach (var loc in visited)
+        {
+            var key = (hitNode, loc);
+            if (shiftDown)
+            {
+                selectedTriangles.Remove(key);
+            }
+            else if (!selectedTriangles.ContainsKey(key))
+            {
+                var p0 = Vector3.Transform(srcMesh.Positions[meshIndices[loc]], transform);
+                var p1 = Vector3.Transform(srcMesh.Positions[meshIndices[loc + 1]], transform);
+                var p2 = Vector3.Transform(srcMesh.Positions[meshIndices[loc + 2]], transform);
+                var normal = Vector3.Normalize(Vector3.Cross(p1 - p0, p2 - p0));
+                var offset = normal * 0.001f;
+                selectedTriangles[key] = (p0 + offset, p1 + offset, p2 + offset);
+            }
+        }
+
+        RebuildSelectionMesh();
+    }
+
+    // Pack UV to a long for use as dictionary key (avoids float comparison issues)
+    private static long PackUV(Vector2 uv)
+    {
+        int x = (int)Math.Round(uv.X * 100000);
+        int y = (int)Math.Round(uv.Y * 100000);
+        return ((long)x << 32) | (uint)y;
+    }
+
+    private static (long, long) SortUVEdge(long a, long b) => a < b ? (a, b) : (b, a);
+
+    private static void AddUVEdge(Dictionary<(long, long), List<int>> map, long v0, long v1, int triOffset)
+    {
+        var edge = SortUVEdge(v0, v1);
+        if (!map.TryGetValue(edge, out var list))
+        {
+            list = new List<int>();
+            map[edge] = list;
+        }
+        list.Add(triOffset);
+    }
+
+    public void HandleUVRectSelection(System.Windows.Point uvStart, System.Windows.Point uvEnd, bool shiftDown)
+    {
+        float left = (float)Math.Min(uvStart.X, uvEnd.X);
+        float right = (float)Math.Max(uvStart.X, uvEnd.X);
+        float top = (float)Math.Min(uvStart.Y, uvEnd.Y);
+        float bottom = (float)Math.Max(uvStart.Y, uvEnd.Y);
+
+        foreach (var meshNode in GetVisibleMeshNodes())
+        {
+            var geom = meshNode.Geometry as MeshGeometry3D;
+            if (geom?.TextureCoordinates is null || geom.Indices is null || geom.Positions is null)
+                continue;
+
+            var uvs = geom.TextureCoordinates;
+            var indices = geom.Indices;
+
+            for (int i = 0; i < indices.Count; i += 3)
+            {
+                var uv0 = uvs[indices[i]];
+                var uv1 = uvs[indices[i + 1]];
+                var uv2 = uvs[indices[i + 2]];
+
+                if (!TriangleIntersectsRect(uv0.X, uv0.Y, uv1.X, uv1.Y, uv2.X, uv2.Y, left, top, right, bottom))
+                    continue;
+
+                var key = (meshNode, i);
+                if (shiftDown)
+                {
+                    selectedTriangles.Remove(key);
+                }
+                else if (!selectedTriangles.ContainsKey(key))
+                {
+                    var transform = meshNode.TotalModelMatrix;
+                    var p0 = Vector3.Transform(geom.Positions[indices[i]], transform);
+                    var p1 = Vector3.Transform(geom.Positions[indices[i + 1]], transform);
+                    var p2 = Vector3.Transform(geom.Positions[indices[i + 2]], transform);
+                    var normal = Vector3.Normalize(Vector3.Cross(p1 - p0, p2 - p0));
+                    var offset = normal * 0.001f;
+                    selectedTriangles[key] = (p0 + offset, p1 + offset, p2 + offset);
+                }
+            }
+        }
+
+        RebuildSelectionMesh();
+    }
+
+    public void HandleFloodFillSelection(HelixToolkit.SharpDX.HitTestResult hit, bool shiftDown)
+    {
+        if (hit.ModelHit is not MeshNode meshNode || hit.TriangleIndices is null)
+            return;
+
+        if (meshNode.Geometry is not MeshGeometry3D srcMesh || srcMesh.Positions is null || srcMesh.Indices is null)
+            return;
+
+        var i0 = hit.TriangleIndices.Item1;
+        var i1 = hit.TriangleIndices.Item2;
+        var i2 = hit.TriangleIndices.Item3;
+
+        int startLoc = FindIndexOffset(srcMesh, i0, i1, i2);
+        if (startLoc < 0) return;
+
+        var indices = srcMesh.Indices;
+
+        // Build edge adjacency: edge (sorted vertex pair) → list of triangle offsets
+        var edgeToTriangles = new Dictionary<(int, int), List<int>>();
+        for (int i = 0; i < indices.Count; i += 3)
+        {
+            var v0 = indices[i];
+            var v1 = indices[i + 1];
+            var v2 = indices[i + 2];
+            AddEdge(edgeToTriangles, v0, v1, i);
+            AddEdge(edgeToTriangles, v1, v2, i);
+            AddEdge(edgeToTriangles, v0, v2, i);
+        }
+
+        // BFS flood fill from the clicked triangle
+        var visited = new HashSet<int>();
+        var queue = new Queue<int>();
+        queue.Enqueue(startLoc);
+        visited.Add(startLoc);
+
+        while (queue.Count > 0)
+        {
+            var tri = queue.Dequeue();
+            var v0 = indices[tri];
+            var v1 = indices[tri + 1];
+            var v2 = indices[tri + 2];
+
+            foreach (var edge in new[] { SortEdge(v0, v1), SortEdge(v1, v2), SortEdge(v0, v2) })
+            {
+                if (edgeToTriangles.TryGetValue(edge, out var neighbors))
+                {
+                    foreach (var neighbor in neighbors)
+                    {
+                        if (visited.Add(neighbor))
+                            queue.Enqueue(neighbor);
+                    }
+                }
+            }
+        }
+
+        // Select or deselect all connected triangles
+        var transform = meshNode.TotalModelMatrix;
+        foreach (var loc in visited)
+        {
+            var key = (meshNode, loc);
+            if (shiftDown)
+            {
+                selectedTriangles.Remove(key);
+            }
+            else if (!selectedTriangles.ContainsKey(key))
+            {
+                var p0 = Vector3.Transform(srcMesh.Positions[indices[loc]], transform);
+                var p1 = Vector3.Transform(srcMesh.Positions[indices[loc + 1]], transform);
+                var p2 = Vector3.Transform(srcMesh.Positions[indices[loc + 2]], transform);
+                var normal = Vector3.Normalize(Vector3.Cross(p1 - p0, p2 - p0));
+                var offset = normal * 0.001f;
+                selectedTriangles[key] = (p0 + offset, p1 + offset, p2 + offset);
+            }
+        }
+
+        RebuildSelectionMesh();
+    }
+
+    private static (int, int) SortEdge(int a, int b) => a < b ? (a, b) : (b, a);
+
+    private static void AddEdge(Dictionary<(int, int), List<int>> map, int v0, int v1, int triOffset)
+    {
+        var edge = SortEdge(v0, v1);
+        if (!map.TryGetValue(edge, out var list))
+        {
+            list = new List<int>();
+            map[edge] = list;
+        }
+        list.Add(triOffset);
+    }
+
+    public void HandleRectSelection(System.Windows.Point screenStart, System.Windows.Point screenEnd, bool shiftDown)
+    {
+        var viewport = mainWindow?.view;
+        if (viewport is null || Camera is null)
+            return;
+
+        var camPos = Camera.Position.ToVector3();
+        float left = (float)Math.Min(screenStart.X, screenEnd.X);
+        float right = (float)Math.Max(screenStart.X, screenEnd.X);
+        float top = (float)Math.Min(screenStart.Y, screenEnd.Y);
+        float bottom = (float)Math.Max(screenStart.Y, screenEnd.Y);
+
+        foreach (var node in GroupModel.GroupNode.Items.PreorderDFT(n => n.IsRenderable))
+        {
+            if (node is not MeshNode meshNode || !meshNode.Visible)
+                continue;
+
+            var geom = meshNode.Geometry as MeshGeometry3D;
+            if (geom?.Positions is null || geom.Indices is null)
+                continue;
+
+            var transform = meshNode.TotalModelMatrix;
+            var indices = geom.Indices;
+
+            for (int i = 0; i < indices.Count; i += 3)
+            {
+                var p0 = Vector3.Transform(geom.Positions[indices[i]], transform);
+                var p1 = Vector3.Transform(geom.Positions[indices[i + 1]], transform);
+                var p2 = Vector3.Transform(geom.Positions[indices[i + 2]], transform);
+
+                // Backface cull (lenient for rect selection — include glancing angles)
+                if (IgnoreBackfacing)
+                {
+                    var normal = Vector3.Normalize(Vector3.Cross(p1 - p0, p2 - p0));
+                    var viewDir = Vector3.Normalize((p0 + p1 + p2) / 3f - camPos);
+                    if (Vector3.Dot(normal, viewDir) > 0.3f)
+                        continue;
+                }
+
+                // Check if any vertex projects inside the rectangle
+                var s0 = viewport.Project(p0);
+                var s1 = viewport.Project(p1);
+                var s2 = viewport.Project(p2);
+
+                if (!TriangleIntersectsRect(s0.X, s0.Y, s1.X, s1.Y, s2.X, s2.Y, left, top, right, bottom))
+                    continue;
+
+                var key = (meshNode, i);
+                if (shiftDown)
+                {
+                    selectedTriangles.Remove(key);
+                }
+                else if (!selectedTriangles.ContainsKey(key))
+                {
+                    var normal = Vector3.Normalize(Vector3.Cross(p1 - p0, p2 - p0));
+                    var offset = normal * 0.001f;
+                    selectedTriangles[key] = (p0 + offset, p1 + offset, p2 + offset);
+                }
+            }
+        }
+
+        RebuildSelectionMesh();
+    }
+
     private static bool PointInTriangle(System.Windows.Point p, Vector2 a, Vector2 b, Vector2 c)
     {
         float px = (float)p.X, py = (float)p.Y;
@@ -730,20 +1129,95 @@ public partial class MainViewModel : DemoCore.BaseViewModel
         return !(hasNeg && hasPos);
     }
 
+    /// <summary>
+    /// Tests if a triangle intersects a rectangle. Checks: vertex in rect, rect corner in triangle, edge crossings.
+    /// </summary>
+    private static bool TriangleIntersectsRect(float ax, float ay, float bx, float by, float cx, float cy,
+        float left, float top, float right, float bottom)
+    {
+        // 1. Any triangle vertex inside rect
+        if ((ax >= left && ax <= right && ay >= top && ay <= bottom)
+         || (bx >= left && bx <= right && by >= top && by <= bottom)
+         || (cx >= left && cx <= right && cy >= top && cy <= bottom))
+            return true;
+
+        // 2. Any rect corner inside triangle
+        var corners = new[] {
+            new System.Windows.Point(left, top), new System.Windows.Point(right, top),
+            new System.Windows.Point(right, bottom), new System.Windows.Point(left, bottom)
+        };
+        var va = new Vector2(ax, ay); var vb = new Vector2(bx, by); var vc = new Vector2(cx, cy);
+        foreach (var c in corners)
+        {
+            if (PointInTriangle(c, va, vb, vc))
+                return true;
+        }
+
+        // 3. Any triangle edge intersects any rect edge
+        float[][] triEdges = { new[] { ax, ay, bx, by }, new[] { bx, by, cx, cy }, new[] { cx, cy, ax, ay } };
+        float[][] rectEdges = {
+            new[] { left, top, right, top }, new[] { right, top, right, bottom },
+            new[] { right, bottom, left, bottom }, new[] { left, bottom, left, top }
+        };
+        foreach (var te in triEdges)
+            foreach (var re in rectEdges)
+                if (SegmentsIntersect(te[0], te[1], te[2], te[3], re[0], re[1], re[2], re[3]))
+                    return true;
+
+        return false;
+    }
+
+    private static bool SegmentsIntersect(float x1, float y1, float x2, float y2, float x3, float y3, float x4, float y4)
+    {
+        float d1 = Cross(x3, y3, x4, y4, x1, y1);
+        float d2 = Cross(x3, y3, x4, y4, x2, y2);
+        float d3 = Cross(x1, y1, x2, y2, x3, y3);
+        float d4 = Cross(x1, y1, x2, y2, x4, y4);
+        if (((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) &&
+            ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0)))
+            return true;
+        return false;
+    }
+
+    private static float Cross(float ax, float ay, float bx, float by, float cx, float cy)
+        => (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+
+    /// <summary>
+    /// Finds the index offset (multiple of 3) in the mesh's index buffer for the given triangle vertex indices.
+    /// </summary>
+    private static int FindIndexOffset(MeshGeometry3D mesh, int i0, int i1, int i2)
+    {
+        if (mesh.Indices is null) return -1;
+        var indices = mesh.Indices;
+        for (int i = 0; i < indices.Count; i += 3)
+        {
+            if (indices[i] == i0 && indices[i + 1] == i1 && indices[i + 2] == i2)
+                return i;
+        }
+        return -1;
+    }
+
     public void HandleTriangleSelection(HelixToolkit.SharpDX.HitTestResult hit, bool shiftDown = false)
     {
-        if (hit.ModelHit is not MeshNode meshNode || hit.Tag is not int loc || hit.TriangleIndices is null)
+        if (hit.ModelHit is not MeshNode meshNode || hit.TriangleIndices is null)
             return;
 
         if (meshNode.Geometry is not MeshGeometry3D srcMesh || srcMesh.Positions is null)
             return;
 
-        // Shift+click deselects in any mode; try both key conventions (octree Tag=idx*3, non-octree Tag=idx/3)
+        var i0 = hit.TriangleIndices.Item1;
+        var i1 = hit.TriangleIndices.Item2;
+        var i2 = hit.TriangleIndices.Item3;
+
+        // Normalize to index offset (multiple of 3) for consistent keys
+        int loc = FindIndexOffset(srcMesh, i0, i1, i2);
+        if (loc < 0) return;
+
+        var key = (meshNode, loc);
+
         if (shiftDown)
         {
-            var key1 = (meshNode, loc);
-            var key2 = (meshNode, loc * 3);
-            if (selectedTriangles.Remove(key1) || selectedTriangles.Remove(key2))
+            if (selectedTriangles.Remove(key))
                 RebuildSelectionMesh();
             return;
         }
@@ -751,29 +1225,24 @@ public partial class MainViewModel : DemoCore.BaseViewModel
         if (SelectionMode != SelectionMode.Single)
             return;
 
-        var key = (meshNode, loc);
-
         if (selectedTriangles.ContainsKey(key))
         {
             selectedTriangles.Remove(key);
         }
         else
         {
-            var i0 = hit.TriangleIndices.Item1;
-            var i1 = hit.TriangleIndices.Item2;
-            var i2 = hit.TriangleIndices.Item3;
             var transform = meshNode.TotalModelMatrix;
 
             var p0 = Vector3.Transform(srcMesh.Positions[i0], transform);
             var p1 = Vector3.Transform(srcMesh.Positions[i1], transform);
             var p2 = Vector3.Transform(srcMesh.Positions[i2], transform);
 
-            // Backface check: skip if triangle faces away from camera
+            // Backface check: skip if triangle faces away from camera (unless backfaces are shown)
             var normal = Vector3.Normalize(Vector3.Cross(p1 - p0, p2 - p0));
             if (Camera is null) return;
             var camPos = Camera.Position.ToVector3();
             var viewDir = Vector3.Normalize((p0 + p1 + p2) / 3f - camPos);
-            if (Vector3.Dot(normal, viewDir) > 0)
+            if (!ShowBackface && Vector3.Dot(normal, viewDir) > 0)
                 return;
 
             // Offset slightly along the triangle normal to avoid z-fighting
@@ -964,11 +1433,11 @@ public partial class MainViewModel : DemoCore.BaseViewModel
                 var p1 = Vector3.Transform(geom.Positions[indices[i + 1]], transform);
                 var p2 = Vector3.Transform(geom.Positions[indices[i + 2]], transform);
 
-                // Backface cull
+                // Backface cull (skip when backfaces are shown)
                 var normal = Vector3.Cross(p1 - p0, p2 - p0);
                 var centroid = (p0 + p1 + p2) / 3f;
                 var viewDir = centroid - camPos;
-                if (Vector3.Dot(normal, viewDir) > 0)
+                if (!ShowBackface && Vector3.Dot(normal, viewDir) > 0)
                     continue;
 
                 // Project centroid to screen
