@@ -613,6 +613,38 @@ public partial class MainViewModel : DemoCore.BaseViewModel
         }
     }
 
+    public void ExportToDefaultPath()
+    {
+        if (importedFilePath is null || scene is null)
+            return;
+
+        var ext = System.IO.Path.GetExtension(importedFilePath).TrimStart('.').ToLowerInvariant();
+        var formats = HelixToolkit.SharpDX.Assimp.Exporter.SupportedFormats;
+        string? formatId = null;
+
+        for (int i = 0; i < formats.Length; i++)
+        {
+            if (formats[i].FileExtension.ToLowerInvariant() == ext)
+            {
+                formatId = formats[i].FormatId;
+                break;
+            }
+        }
+
+        if (formatId is null && formats.Length > 0)
+            formatId = formats[0].FormatId;
+
+        if (formatId is null)
+            return;
+
+        var dir = System.IO.Path.GetDirectoryName(importedFilePath) ?? ".";
+        var name = System.IO.Path.GetFileNameWithoutExtension(importedFilePath);
+        var outPath = System.IO.Path.Combine(dir, name + "_reduced." + ext);
+
+        var exporter = new HelixToolkit.SharpDX.Assimp.Exporter();
+        exporter.ExportToFile(outPath, scene, formatId);
+    }
+
     [RelayCommand]
     private void Export()
     {
