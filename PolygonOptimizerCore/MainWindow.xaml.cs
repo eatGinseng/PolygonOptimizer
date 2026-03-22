@@ -18,8 +18,11 @@ public partial class MainWindow : Window
     private const double DragThreshold = 5.0;
     private readonly MouseBinding panBinding;
 
-    public MainWindow()
+    private readonly string? initialFilePath;
+
+    public MainWindow(string? filePath = null)
     {
+        initialFilePath = filePath;
         InitializeComponent();
 
         var vm = new MainViewModel(this);
@@ -62,6 +65,15 @@ public partial class MainWindow : Window
         }));
 
         Closed += (s, e) => (DataContext as IDisposable)?.Dispose();
+
+        if (initialFilePath is not null)
+        {
+            ContentRendered += (s, e) =>
+            {
+                if (DataContext is MainViewModel mainVm)
+                    mainVm.OpenFileFromPath(initialFilePath);
+            };
+        }
     }
 
     private void UpdatePanBinding(SelectionMode mode)
@@ -153,8 +165,19 @@ public partial class MainWindow : Window
         return camPos + rightDir * nx * width - upDir * ny * height + lookDir * 0.5f;
     }
 
-    private Point uvDragStart;
+    private Point uvDragStart; // in canvas coordinates (with offset)
     private bool uvDragActive = false;
+    private bool uvPanning = false;
+    private Point uvPanStart;
+    private const double UVPadding = 0.1;
+
+    private static Point CanvasToUV(Point canvasPoint) =>
+        new(canvasPoint.X - UVPadding, canvasPoint.Y - UVPadding);
+
+    private void Exit_Click(object sender, RoutedEventArgs e)
+    {
+        Close();
+    }
 
     private void UVPanel_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
     {
@@ -169,6 +192,16 @@ public partial class MainWindow : Window
 
     private void UVPanel_MouseMove(object sender, MouseEventArgs e)
     {
+        // Middle-click pan
+        if (uvPanning && e.MiddleButton == MouseButtonState.Pressed)
+        {
+            var panPos = e.GetPosition(uvGrid);
+            uvPan.X += panPos.X - uvPanStart.X;
+            uvPan.Y += panPos.Y - uvPanStart.Y;
+            uvPanStart = panPos;
+            return;
+        }
+
         if (DataContext is not MainViewModel || e.LeftButton != MouseButtonState.Pressed)
             return;
 
@@ -199,17 +232,56 @@ public partial class MainWindow : Window
         if (uvDragActive)
         {
             var uvEnd = e.GetPosition(uvCanvas);
-            vm.HandleUVRectSelection(uvDragStart, uvEnd, shiftDown);
+            vm.HandleUVRectSelection(CanvasToUV(uvDragStart), CanvasToUV(uvEnd), shiftDown);
         }
         else
         {
+            var uvPoint = CanvasToUV(uvDragStart);
             if (vm.SelectConnected)
-                vm.HandleUVFloodFillSelection(uvDragStart, shiftDown);
+                vm.HandleUVFloodFillSelection(uvPoint, shiftDown);
             else
-                vm.HandleUVSelection(uvDragStart, shiftDown);
+                vm.HandleUVSelection(uvPoint, shiftDown);
         }
 
         uvSelectionRect.Data = null;
         uvDragActive = false;
+    }
+
+    private void UVPanel_MouseDown(object sender, MouseButtonEventArgs e)
+    {
+        if (e.ChangedButton == MouseButton.Middle)
+        {
+            uvPanning = true;
+            uvPanStart = e.GetPosition(uvGrid);
+            uvGrid.CaptureMouse();
+            e.Handled = true;
+        }
+    }
+
+    private void UVPanel_MouseUp(object sender, MouseButtonEventArgs e)
+    {
+        if (e.ChangedButton == MouseButton.Middle && uvPanning)
+        {
+            uvPanning = false;
+            if (!uvDragActive)
+                uvGrid.ReleaseMouseCapture();
+            e.Handled = true;
+        }
+    }
+
+    private void UVPanel_MouseWheel(object sender, MouseWheelEventArgs e)
+    {
+        double factor = e.Delta > 0 ? 1.15 : 1.0 / 1.15;
+        var mousePos = e.GetPosition(uvGrid);
+        var gridCenterX = uvGrid.ActualWidth / 2;
+        var gridCenterY = uvGrid.ActualHeight / 2;
+
+        // Zoom toward mouse position
+        uvPan.X = mousePos.X - gridCenterX + (uvPan.X - mousePos.X + gridCenterX) * factor;
+        uvPan.Y = mousePos.Y - gridCenterY + (uvPan.Y - mousePos.Y + gridCenterY) * factor;
+        uvZoom.ScaleX *= factor;
+        uvZoom.ScaleY *= factor;
+
+        e.Handled = true;
     }
 }
