@@ -8,6 +8,9 @@
 
 	Works on Editable Poly and Editable Mesh objects.
 	Selected faces are stored as the object's face/polygon sub-object selection.
+
+	Uses Max's native viewport selection with hardware occlusion culling
+	via .NET SendInput for reliable results.
 */
 
 (
@@ -19,6 +22,150 @@ global PolyOpt_Rollout
 global PolyOpt_AccumulatedFaces = #{}  -- bitarray of selected face indices
 global PolyOpt_TargetObj = undefined
 global PolyOpt_IsIterating = false
+global PolyOpt_MouseHelper = undefined  -- .NET helper for mouse simulation
+
+-- ============================================================
+-- .NET MOUSE SIMULATION HELPER
+-- ============================================================
+
+fn poInitMouseHelper =
+(
+	if PolyOpt_MouseHelper != undefined then return true
+
+	local source = "
+using System;
+using System.Runtime.InteropServices;
+using System.Threading;
+using System.Collections.Generic;
+
+public class PolyOptMouseHelper
+{
+	[DllImport(\"user32.dll\")]
+	static extern bool SetCursorPos(int X, int Y);
+
+	[DllImport(\"user32.dll\")]
+	static extern bool GetCursorPos(out POINT lpPoint);
+
+	[DllImport(\"user32.dll\")]
+	static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+
+	[DllImport(\"user32.dll\")]
+	static extern void mouse_event(uint dwFlags, int dx, int dy, uint dwData, IntPtr dwExtraInfo);
+
+	[DllImport(\"user32.dll\")]
+	static extern bool EnumChildWindows(IntPtr hWndParent, EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
+	delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+	[StructLayout(LayoutKind.Sequential)]
+	public struct POINT { public int X; public int Y; }
+
+	[StructLayout(LayoutKind.Sequential)]
+	public struct RECT { public int Left, Top, Right, Bottom; }
+
+	const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
+	const uint MOUSEEVENTF_LEFTUP = 0x0004;
+
+	int savedX, savedY;
+
+	void SaveCursor()
+	{
+		POINT p;
+		GetCursorPos(out p);
+		savedX = p.X;
+		savedY = p.Y;
+	}
+
+	void RestoreCursor()
+	{
+		SetCursorPos(savedX, savedY);
+	}
+
+	public void RectSelect(int x1, int y1, int x2, int y2, int delayMs)
+	{
+		SaveCursor();
+
+		SetCursorPos(x1, y1);
+		Thread.Sleep(delayMs);
+		mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, IntPtr.Zero);
+		Thread.Sleep(delayMs);
+
+		SetCursorPos(x2, y2);
+		Thread.Sleep(delayMs);
+
+		mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, IntPtr.Zero);
+		Thread.Sleep(delayMs);
+
+		RestoreCursor();
+	}
+
+	[DllImport(\"user32.dll\")]
+	static extern IntPtr WindowFromPoint(POINT p);
+
+	// Find the viewport child window by matching its size to the known viewport dimensions
+	public int[] FindViewportRect(int maxHwndInt, int vpWidth, int vpHeight)
+	{
+		IntPtr maxHwnd = new IntPtr(maxHwndInt);
+		int[] result = null;
+		int tolerance = 10;
+
+		// Strategy 1: find child window matching known viewport dimensions
+		EnumChildWindows(maxHwnd, (hWnd, lParam) =>
+		{
+			RECT r;
+			GetWindowRect(hWnd, out r);
+			int w = r.Right - r.Left;
+			int h = r.Bottom - r.Top;
+			if (Math.Abs(w - vpWidth) <= tolerance && Math.Abs(h - vpHeight) <= tolerance)
+			{
+				result = new int[] { r.Left, r.Top, r.Right, r.Bottom };
+				return false; // found, stop
+			}
+			return true;
+		}, IntPtr.Zero);
+
+		if (result != null) return result;
+
+		// Strategy 2: use WindowFromPoint at center of main window
+		RECT mainRect;
+		GetWindowRect(maxHwnd, out mainRect);
+		POINT center;
+		center.X = (mainRect.Left + mainRect.Right) / 2;
+		center.Y = (mainRect.Top + mainRect.Bottom) / 2;
+		IntPtr vpHwnd = WindowFromPoint(center);
+		if (vpHwnd != IntPtr.Zero)
+		{
+			RECT vpRect;
+			GetWindowRect(vpHwnd, out vpRect);
+			return new int[] { vpRect.Left, vpRect.Top, vpRect.Right, vpRect.Bottom };
+		}
+
+		// Fallback: estimate from main window
+		return new int[] { mainRect.Left + 10, mainRect.Top + 130, mainRect.Right - 10, mainRect.Bottom - 50 };
+	}
+}
+"
+
+	local csharpProvider = dotNetObject "Microsoft.CSharp.CSharpCodeProvider"
+	local compilerParams = dotNetObject "System.CodeDom.Compiler.CompilerParameters"
+	compilerParams.GenerateInMemory = true
+	compilerParams.ReferencedAssemblies.Add "System.dll"
+
+	local results = csharpProvider.CompileAssemblyFromSource compilerParams #(source)
+
+	if results.Errors.HasErrors then
+	(
+		local errMsg = ""
+		for i = 0 to results.Errors.Count - 1 do
+			errMsg += (results.Errors.Item[i].ErrorText) + "\n"
+		messageBox ("Failed to compile .NET helper:\n" + errMsg) title:"Error"
+		return false
+	)
+
+	PolyOpt_MouseHelper = results.CompiledAssembly.CreateInstance "PolyOptMouseHelper"
+	true
+)
+
 
 -- ============================================================
 -- UTILITY FUNCTIONS
@@ -40,12 +187,19 @@ fn poGetFaceNormalWorld obj faceIdx =
 (
 	local n
 	if classOf obj.baseObject == Editable_Poly then
+	(
 		n = polyop.getFaceNormal obj faceIdx
+	)
 	else
-		n = meshop.getFaceNormal obj faceIdx
+	(
+		-- meshop has no getFaceNormal — compute from face vertices
+		local faceVerts = meshop.getFace obj faceIdx
+		local v0 = meshop.getVert obj (faceVerts.x as integer)
+		local v1 = meshop.getVert obj (faceVerts.y as integer)
+		local v2 = meshop.getVert obj (faceVerts.z as integer)
+		n = normalize (cross (v1 - v0) (v2 - v0))
+	)
 	-- Transform normal to world space (rotation only)
-	n = normalize (n * (inverse obj.transform.rotation))
-	-- Correction: multiply by the rotation part of the transform
 	n = normalize (n * obj.transform.rotation)
 	n
 )
@@ -59,31 +213,6 @@ fn poGetFaceCenterWorld obj faceIdx =
 	else
 		c = meshop.getFaceCenter obj faceIdx
 	c * obj.transform
-)
-
--- Get face vertices in world space
-fn poGetFaceVertsWorld obj faceIdx =
-(
-	local vertIdxs
-	if classOf obj.baseObject == Editable_Poly then
-		vertIdxs = polyop.getFaceVerts obj faceIdx
-	else
-		vertIdxs = meshop.getFace obj faceIdx  -- returns point3 of indices
-
-	local verts = #()
-	if classOf obj.baseObject == Editable_Poly then
-	(
-		for vi in vertIdxs do
-			append verts (polyop.getVert obj vi * obj.transform)
-	)
-	else
-	(
-		-- meshop.getFace returns a point3 (integer indices)
-		append verts ((meshop.getVert obj (vertIdxs.x as integer)) * obj.transform)
-		append verts ((meshop.getVert obj (vertIdxs.y as integer)) * obj.transform)
-		append verts ((meshop.getVert obj (vertIdxs.z as integer)) * obj.transform)
-	)
-	verts
 )
 
 -- Check if object is a valid target (Editable Poly or Editable Mesh)
@@ -107,53 +236,85 @@ fn poApplySelection obj faceBits =
 	else
 	(
 		subobjectLevel = 3  -- Face sub-object for Editable Mesh
-		meshop.setFaceSelection obj faceBits
+		obj.selectedFaces = faceBits
 	)
 	redrawViews()
 	true
 )
 
--- ============================================================
--- OCCLUSION TEST (Ray-based)
--- ============================================================
-
--- Check if a face is occluded from a given camera position.
--- Fires a ray from camPos toward the face center.
--- If the ray hits something closer than the face, it's occluded.
-fn poIsFaceOccluded obj faceIdx camPos thresholdPct =
+-- Get the current face selection from the object as a bitarray
+fn poGetFaceSelection obj =
 (
-	local faceCenter = poGetFaceCenterWorld obj faceIdx
-	local dir = normalize (faceCenter - camPos)
-	local distToFace = length (faceCenter - camPos)
-	local tolerance = distToFace * (thresholdPct / 100.0)
-
-	local testRay = ray camPos dir
-
-	-- Test against ALL geometry in the scene (including the object itself)
-	local hitResult = intersectRay obj testRay
-
-	if hitResult != undefined then
-	(
-		local hitDist = length (hitResult.pos - camPos)
-		-- If hit is significantly closer than the face center, face is occluded
-		if hitDist < (distToFace - tolerance) then
-			return true
-	)
-
-	-- Also test against other geometry in the scene
-	for otherObj in geometry where otherObj != obj and otherObj.isHidden == false do
-	(
-		local otherHit = intersectRay otherObj testRay
-		if otherHit != undefined then
-		(
-			local otherDist = length (otherHit.pos - camPos)
-			if otherDist < (distToFace - tolerance) then
-				return true
-		)
-	)
-
-	false
+	if classOf obj.baseObject == Editable_Poly then
+		polyop.getFaceSelection obj
+	else
+		getFaceSelection obj
 )
+
+
+-- ============================================================
+-- 2. VIEW-BASED SELECTION (using Max's native viewport selection)
+-- ============================================================
+
+-- Select visible faces using Max's native rectangle selection with occlusion culling.
+-- This leverages Max's hardware-accelerated visibility testing.
+fn poSelectCurrentViewNative obj ignoreBackface delayMs:80 =
+(
+	if not (poIsValidTarget obj) then return #{}
+	if not (poInitMouseHelper()) then return #{}
+
+	-- Make sure the object is selected and in face sub-object mode
+	select obj
+	max modify mode
+
+	if classOf obj.baseObject == Editable_Poly then
+	(
+		subobjectLevel = 4  -- Polygon sub-object
+		obj.ignoreBackfacing = ignoreBackface
+	)
+	else
+	(
+		subobjectLevel = 3  -- Face sub-object
+		obj.ignoreBackfacing = ignoreBackface
+	)
+
+	-- Clear face selection (we accumulate separately)
+	if classOf obj.baseObject == Editable_Poly then
+		polyop.setFaceSelection obj #{}
+	else
+		obj.selectedFaces = #{}
+
+	forceCompleteRedraw()
+
+	-- Get Max window HWND and viewport dimensions
+	local maxHwnd = windows.getMaxHWND()
+	local vpSize = getViewSize()
+	local vpW = vpSize.x as integer
+	local vpH = vpSize.y as integer
+
+	-- Find viewport screen rect by matching known viewport dimensions
+	local vpRect = PolyOpt_MouseHelper.FindViewportRect maxHwnd vpW vpH
+
+	local vpLeft = vpRect[1]
+	local vpTop = vpRect[2]
+	local vpRight = vpRect[3]
+	local vpBottom = vpRect[4]
+
+	-- Add margin to avoid viewport label menus at top-left
+	local x1 = vpLeft + 40
+	local y1 = vpTop + 40
+	local x2 = vpRight - 10
+	local y2 = vpBottom - 10
+
+	-- Perform rectangle selection covering the viewport
+	PolyOpt_MouseHelper.RectSelect x1 y1 x2 y2 delayMs
+
+	-- Read back the selection Max made
+	local newFaces = poGetFaceSelection obj
+
+	newFaces
+)
+
 
 -- ============================================================
 -- 1. SINGLE FACE PICK MODE
@@ -254,65 +415,6 @@ tool PolyOpt_PickMode
 
 	on mouseMove clickno do () -- required stub
 	on mouseAbort clickno do ()
-)
-
-
--- ============================================================
--- 2. VIEW-BASED OCCLUSION SELECTION
--- ============================================================
-
-fn poSelectCurrentView obj thresholdPct ignoreBackface: true =
-(
-	if not (poIsValidTarget obj) then return #{}
-
-	local faceCount = poGetFaceCount obj
-	if faceCount == 0 then return #{}
-
-	-- Get camera position from active viewport
-	local camTM = viewport.getTM()
-	local camPos = camTM.position  -- This is actually wrong for getTM
-	-- viewport.getTM() returns the inverse camera matrix
-	-- Camera position = inverse of getTM translation
-	local invTM = inverse (viewport.getTM())
-	camPos = invTM.position
-
-	local camDir = -invTM.row3  -- Camera forward direction (negative Z)
-
-	local newSelection = #{}
-
-	-- Get viewport dimensions for screen-space checks
-	local vpSize = getViewSize()
-	local vpWidth = vpSize.x
-	local vpHeight = vpSize.y
-
-	for f = 1 to faceCount do
-	(
-		-- Skip already selected faces
-		if PolyOpt_AccumulatedFaces[f] then continue
-
-		local faceCenter = poGetFaceCenterWorld obj f
-		local faceNormal = poGetFaceNormalWorld obj f
-
-		-- Backface culling
-		if ignoreBackface then
-		(
-			local viewDir = normalize (faceCenter - camPos)
-			if (dot faceNormal viewDir) > 0 then continue
-		)
-
-		-- Check if face center is within viewport (project to screen)
-		local screenPos = gw.wPoint faceCenter  -- Projects world point to screen
-		if screenPos.x < 0 or screenPos.x >= vpWidth or screenPos.y < 0 or screenPos.y >= vpHeight then
-			continue
-
-		-- Occlusion test: fire ray from camera toward face center
-		if not (poIsFaceOccluded obj f camPos thresholdPct) then
-		(
-			newSelection[f] = true
-		)
-	)
-
-	newSelection
 )
 
 
@@ -422,10 +524,11 @@ rollout PolyOpt_Rollout "Polygon Optimizer" width:220 height:520
 	)
 
 	-- View-Based Selection
-	group "2. View Selection"
+	group "2. View Selection (Native)"
 	(
-		spinner spnOccThreshold "Occlusion Threshold %:" range:[0.1, 50.0, 2.0] type:#float fieldwidth:50
+		spinner spnSelectDelay "Selection Delay (ms):" range:[20, 500, 80] type:#integer fieldwidth:50
 		button btnSelectView "Select Current View" width:190 height:28
+		label lblViewHelp "Uses Max's viewport occlusion culling" align:#left
 	)
 
 	-- Octahedron Iteration
@@ -433,7 +536,7 @@ rollout PolyOpt_Rollout "Polygon Optimizer" width:220 height:520
 	(
 		spinner spnResolution "Octahedron Resolution:" range:[1, 8, 4] type:#integer fieldwidth:50
 		spinner spnCamWidth "Camera Width Scale:" range:[0.5, 10.0, 2.0] type:#float fieldwidth:50
-		spinner spnRenderWait "Wait per View (ms):" range:[10, 1000, 50] type:#integer fieldwidth:50
+		spinner spnRenderWait "Wait per View (ms):" range:[10, 1000, 100] type:#integer fieldwidth:50
 		label lblVertCount "Camera positions: 17"
 		button btnIterateViews "Iterate All Views" width:190 height:28
 		button btnStopIterate "Stop" width:190 height:22 enabled:false
@@ -495,7 +598,7 @@ rollout PolyOpt_Rollout "Polygon Optimizer" width:220 height:520
 		btnStopPick.enabled = false
 	)
 
-	-- View Selection
+	-- View Selection (Native)
 	on btnSelectView pressed do
 	(
 		if not (poIsValidTarget PolyOpt_TargetObj) then
@@ -504,8 +607,8 @@ rollout PolyOpt_Rollout "Polygon Optimizer" width:220 height:520
 			return()
 		)
 
-		local newFaces = poSelectCurrentView PolyOpt_TargetObj spnOccThreshold.value \
-			ignoreBackface:chkIgnoreBackface.checked
+		local newFaces = poSelectCurrentViewNative PolyOpt_TargetObj chkIgnoreBackface.checked \
+			delayMs:spnSelectDelay.value
 
 		-- Accumulate
 		PolyOpt_AccumulatedFaces = PolyOpt_AccumulatedFaces + newFaces
@@ -522,12 +625,18 @@ rollout PolyOpt_Rollout "Polygon Optimizer" width:220 height:520
 			return()
 		)
 
+		if not (poInitMouseHelper()) then
+		(
+			messageBox "Failed to initialize .NET mouse helper." title:"Error"
+			return()
+		)
+
 		local obj = PolyOpt_TargetObj
 		local resolution = spnResolution.value
 		local camWidthScale = spnCamWidth.value
-		local occThreshold = spnOccThreshold.value
 		local waitMs = spnRenderWait.value
 		local ignoreBack = chkIgnoreBackface.checked
+		local selDelay = spnSelectDelay.value
 
 		-- Build octahedron camera positions
 		local unitVerts = poBuildOctahedronVertices resolution
@@ -553,8 +662,8 @@ rollout PolyOpt_Rollout "Polygon Optimizer" width:220 height:520
 		local savedTM = viewport.getTM()
 		local savedFOV = viewport.GetFOV()
 
-		-- Switch to orthographic
-		viewport.setType #view_persp_user  -- Ensure it's a user view we can control
+		-- Switch to orthographic user view
+		viewport.setType #view_persp_user
 
 		PolyOpt_IsIterating = true
 		btnIterateViews.enabled = false
@@ -583,15 +692,14 @@ rollout PolyOpt_Rollout "Polygon Optimizer" width:220 height:520
 			viewport.setTM camTM
 
 			-- Set orthographic field of view
-			-- In Max, FOV for ortho view controls the visible width
 			viewport.setFOV (orthoWidth)
 
-			-- Wait for render
+			-- Wait for render to complete
 			forceCompleteRedraw()
 			sleep (waitMs / 1000.0)
 
-			-- Select visible faces from this view
-			local newFaces = poSelectCurrentView obj occThreshold ignoreBackface:ignoreBack
+			-- Select visible faces using native viewport selection
+			local newFaces = poSelectCurrentViewNative obj ignoreBack delayMs:selDelay
 			PolyOpt_AccumulatedFaces = PolyOpt_AccumulatedFaces + newFaces
 
 			-- Update UI
@@ -601,7 +709,7 @@ rollout PolyOpt_Rollout "Polygon Optimizer" width:220 height:520
 			windows.processPostedMessages()  -- Keep UI responsive
 		)
 
-		-- Apply final selection
+		-- Apply final accumulated selection
 		poApplySelection obj PolyOpt_AccumulatedFaces
 
 		-- Restore viewport
@@ -631,7 +739,7 @@ rollout PolyOpt_Rollout "Polygon Optimizer" width:220 height:520
 		try (stopTool PolyOpt_PickMode) catch()
 	)
 
-	-- Initialize vertex count label
+	-- Initialize
 	on PolyOpt_Rollout open do
 	(
 		local testVerts = poBuildOctahedronVertices spnResolution.value
@@ -643,6 +751,9 @@ rollout PolyOpt_Rollout "Polygon Optimizer" width:220 height:520
 			PolyOpt_TargetObj = selection[1]
 			lblTarget.text = PolyOpt_TargetObj.name
 		)
+
+		-- Pre-compile the .NET helper
+		poInitMouseHelper()
 	)
 )
 
